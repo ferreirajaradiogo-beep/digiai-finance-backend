@@ -8,6 +8,8 @@ services:
     envVars:
       - key: APP_NAME
         value: DigiAI Finance API
+      - key: PYTHON_VERSION
+        value: 3.12.11
       - key: APP_ENV
         value: production
       - key: CORS_ORIGINS
