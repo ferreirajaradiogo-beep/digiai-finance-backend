@@ -32,7 +32,49 @@ from .schemas import (
 from .security import create_access_token, get_current_user, hash_password, verify_password
 
 settings = get_settings()
-FREE_THEME_KEYS = {"black", "white", "ocean"}
+BACKGROUND_THEME_KEYS = {"black", "white"}
+ACCENT_THEME_KEYS = {"ocean", "graphite", "ember", "royal", "sand", "mint"}
+FREE_THEME_KEYS = {"black-ocean", "white-ocean"}
+
+
+def compose_theme_key(background: str, accent: str) -> str:
+    bg = str(background or "black").strip().lower()
+    accent_key = str(accent or "ocean").strip().lower()
+    if bg not in BACKGROUND_THEME_KEYS:
+        bg = "black"
+    if accent_key not in ACCENT_THEME_KEYS:
+        accent_key = "ocean"
+    return f"{bg}-{accent_key}"
+
+
+def split_theme_key(value: str | None) -> tuple[str, str]:
+    normalized = str(value or "").strip().lower()
+    legacy_map = {
+        "black": ("black", "ocean"),
+        "white": ("white", "ocean"),
+        "ocean": ("black", "ocean"),
+        "graphite": ("black", "graphite"),
+        "ember": ("black", "ember"),
+        "royal": ("black", "royal"),
+        "sand": ("black", "sand"),
+        "mint": ("black", "mint"),
+    }
+    if normalized in legacy_map:
+        return legacy_map[normalized]
+    if "-" in normalized:
+        background, accent = normalized.split("-", 1)
+        return (
+            background if background in BACKGROUND_THEME_KEYS else "black",
+            accent if accent in ACCENT_THEME_KEYS else "ocean",
+        )
+    return ("black", "ocean")
+
+
+def normalize_theme_key(value: str | None, *, free_only: bool = False) -> str:
+    background, accent = split_theme_key(value)
+    if free_only and accent != "ocean":
+        accent = "ocean"
+    return compose_theme_key(background, accent)
 
 
 def normalize_plan_value(value: str) -> str:
@@ -57,20 +99,21 @@ def init_db():
     Base.metadata.create_all(bind=engine)
 
 
-def normalize_beta_users_to_free() -> None:
+def normalize_user_preferences() -> None:
     db = SessionLocal()
     try:
         users = db.query(User).all()
         changed = False
         for user in users:
-            if user.plan != "free":
+            if user.plan not in {"free", "pro"}:
                 user.plan = "free"
                 changed = True
-            if user.currency != "BRL":
+            if user.plan == "free" and user.currency != "BRL":
                 user.currency = "BRL"
                 changed = True
-            if user.theme_key not in FREE_THEME_KEYS:
-                user.theme_key = "black"
+            normalized_theme = normalize_theme_key(user.theme_key, free_only=user.plan == "free")
+            if user.theme_key != normalized_theme:
+                user.theme_key = normalized_theme
                 changed = True
         if changed:
             db.commit()
@@ -81,7 +124,7 @@ def normalize_beta_users_to_free() -> None:
 @app.on_event("startup")
 def startup():
     init_db()
-    normalize_beta_users_to_free()
+    normalize_user_preferences()
 
 
 def public_user(user: User) -> dict:
@@ -161,7 +204,7 @@ def register(data: RegisterIn, db: Session = Depends(get_db)):
     if db.query(User).filter((User.username == username) | (User.email == email)).first():
         raise HTTPException(status_code=409, detail="Usuario ou e-mail ja cadastrado")
 
-    user = User(username=username, email=email, password_hash=hash_password(data.password), plan="free")
+    user = User(username=username, email=email, password_hash=hash_password(data.password), plan="free", theme_key="black-ocean")
     db.add(user)
     db.flush()
     create_default_records(db, user)
@@ -218,14 +261,17 @@ def me(user: User = Depends(get_current_user)):
 
 @app.patch("/me/settings")
 def update_settings(data: SettingsIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    normalized_theme_key = normalize_theme_key(data.theme_key) if data.theme_key is not None else None
     if user.plan == "free":
         if data.currency is not None and str(data.currency).strip().upper() != "BRL":
             raise HTTPException(status_code=403, detail="Plano gratis permite apenas BRL")
-        if data.theme_key is not None and str(data.theme_key).strip().lower() not in FREE_THEME_KEYS:
+        if normalized_theme_key is not None and normalized_theme_key not in FREE_THEME_KEYS:
             raise HTTPException(status_code=403, detail="Plano gratis permite apenas temas basicos")
     for field in ("language", "currency", "theme_key", "monthly_limit"):
         value = getattr(data, field)
         if value is not None:
+            if field == "theme_key":
+                value = normalized_theme_key
             setattr(user, field, value)
     db.commit()
     db.refresh(user)
@@ -238,8 +284,7 @@ def update_plan(data: PlanUpdateIn, user: User = Depends(get_current_user), db: 
     user.plan = next_plan
     if next_plan == "free":
         user.currency = "BRL"
-        if user.theme_key not in FREE_THEME_KEYS:
-            user.theme_key = "ocean"
+        user.theme_key = normalize_theme_key(user.theme_key, free_only=True)
     db.commit()
     db.refresh(user)
     return public_user(user)
