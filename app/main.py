@@ -34,7 +34,6 @@ from .security import create_access_token, get_current_user, hash_password, veri
 settings = get_settings()
 BACKGROUND_THEME_KEYS = {"black", "white"}
 ACCENT_THEME_KEYS = {"ocean", "graphite", "ember", "royal", "sand", "mint"}
-FREE_THEME_KEYS = {"black-ocean", "white-ocean"}
 
 
 def compose_theme_key(background: str, accent: str) -> str:
@@ -72,8 +71,6 @@ def split_theme_key(value: str | None) -> tuple[str, str]:
 
 def normalize_theme_key(value: str | None, *, free_only: bool = False) -> str:
     background, accent = split_theme_key(value)
-    if free_only and accent != "ocean":
-        accent = "ocean"
     return compose_theme_key(background, accent)
 
 
@@ -111,7 +108,7 @@ def normalize_user_preferences() -> None:
             if user.plan == "free" and user.currency != "BRL":
                 user.currency = "BRL"
                 changed = True
-            normalized_theme = normalize_theme_key(user.theme_key, free_only=user.plan == "free")
+            normalized_theme = normalize_theme_key(user.theme_key)
             if user.theme_key != normalized_theme:
                 user.theme_key = normalized_theme
                 changed = True
@@ -265,8 +262,6 @@ def update_settings(data: SettingsIn, user: User = Depends(get_current_user), db
     if user.plan == "free":
         if data.currency is not None and str(data.currency).strip().upper() != "BRL":
             raise HTTPException(status_code=403, detail="Plano gratis permite apenas BRL")
-        if normalized_theme_key is not None and normalized_theme_key not in FREE_THEME_KEYS:
-            raise HTTPException(status_code=403, detail="Plano gratis permite apenas temas basicos")
     for field in ("language", "currency", "theme_key", "monthly_limit"):
         value = getattr(data, field)
         if value is not None:
@@ -284,7 +279,7 @@ def update_plan(data: PlanUpdateIn, user: User = Depends(get_current_user), db: 
     user.plan = next_plan
     if next_plan == "free":
         user.currency = "BRL"
-        user.theme_key = normalize_theme_key(user.theme_key, free_only=True)
+        user.theme_key = normalize_theme_key(user.theme_key)
     db.commit()
     db.refresh(user)
     return public_user(user)
