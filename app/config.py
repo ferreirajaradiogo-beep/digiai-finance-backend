@@ -20,6 +20,8 @@ class Settings:
     smtp_user = os.getenv("SMTP_USER", "")
     smtp_password = os.getenv("SMTP_PASSWORD", "")
     smtp_from = os.getenv("SMTP_FROM", "") or smtp_user
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
 
 
 @lru_cache

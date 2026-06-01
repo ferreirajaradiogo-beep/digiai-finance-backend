@@ -46,6 +46,18 @@ class PasswordUpdateIn(BaseModel):
     new_password: str = Field(min_length=6)
 
 
+class AssistantChatIn(BaseModel):
+    question: str = Field(min_length=2, max_length=1200)
+    mode: str | None = Field(default="auto", max_length=40)
+
+
+class AssistantChatOut(BaseModel):
+    answer: str
+    provider: str
+    mode: str
+    suggestions: list[str] = []
+
+
 class AccountIn(BaseModel):
     name: str = Field(min_length=1, max_length=120)
     kind: str = "conta"

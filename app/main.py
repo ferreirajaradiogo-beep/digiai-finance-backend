@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, extract
 from sqlalchemy.orm import Session
 
+from .assistant import build_assistant_reply
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .email_service import send_reset_code
@@ -14,6 +15,8 @@ from .models import Account, Backup, Category, Transaction, User
 from .schemas import (
     AccountIn,
     AccountOut,
+    AssistantChatIn,
+    AssistantChatOut,
     BackupIn,
     CategoryIn,
     CategoryOut,
@@ -295,6 +298,11 @@ def update_password(data: PasswordUpdateIn, user: User = Depends(get_current_use
     user.password_hash = hash_password(data.new_password)
     db.commit()
     return {"ok": True}
+
+
+@app.post("/assistant/chat", response_model=AssistantChatOut)
+def assistant_chat(data: AssistantChatIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return build_assistant_reply(data.question, db, user, settings)
 
 
 @app.get("/accounts", response_model=list[AccountOut])
