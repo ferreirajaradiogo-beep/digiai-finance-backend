@@ -121,7 +121,7 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
     }
 
 
-def _build_openai_input(question: str, user: User, snapshot: dict) -> tuple[str, str]:
+def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str, str]:
     system_prompt = (
         "Voce e o assistente do produto DiGiaI Caixa. Responda em portugues do Brasil, "
         "de forma objetiva, amigavel e pratica. Nao invente recursos que o produto nao tem. "
@@ -159,14 +159,27 @@ def _extract_openai_text(payload: dict) -> str:
     return "\n\n".join(parts).strip()
 
 
-def _build_openai_answer(question: str, user: User, snapshot: dict, settings) -> dict | None:
-    if not settings.openai_api_key:
-        logger.info("assistant fallback: missing OPENAI_API_KEY")
-        return None
+def _extract_openrouter_text(payload: dict) -> str:
+    for choice in payload.get("choices") or []:
+        message = choice.get("message") or {}
+        content = message.get("content")
+        if isinstance(content, str) and content.strip():
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, dict):
+                    text = item.get("text")
+                    if isinstance(text, str) and text.strip():
+                        parts.append(text.strip())
+            if parts:
+                return "\n\n".join(parts).strip()
+    return ""
 
-    system_prompt, user_prompt = _build_openai_input(question, user, snapshot)
+
+def _call_openai(system_prompt: str, user_prompt: str, settings) -> tuple[dict | None, str | None]:
     body = {
-        "model": settings.openai_model,
+        "model": settings.assistant_model,
         "input": [
             {"role": "system", "content": [{"type": "input_text", "text": system_prompt}]},
             {"role": "user", "content": [{"type": "input_text", "text": user_prompt}]},
@@ -178,7 +191,7 @@ def _build_openai_answer(question: str, user: User, snapshot: dict, settings) ->
             response = client.post(
                 "https://api.openai.com/v1/responses",
                 headers={
-                    "Authorization": f"Bearer {settings.openai_api_key}",
+                    "Authorization": f"Bearer {settings.assistant_api_key}",
                     "Content-Type": "application/json",
                 },
                 json=body,
@@ -187,24 +200,85 @@ def _build_openai_answer(question: str, user: User, snapshot: dict, settings) ->
             data = response.json()
     except httpx.HTTPStatusError as exc:
         body_preview = exc.response.text[:400] if exc.response is not None else ""
-        logger.warning("assistant fallback: openai http error status=%s body=%s", exc.response.status_code if exc.response is not None else "unknown", body_preview)
-        return None
+        status_code = exc.response.status_code if exc.response is not None else "unknown"
+        logger.warning("assistant fallback: openai http error status=%s body=%s", status_code, body_preview)
+        return None, "provider_http_error"
     except Exception as exc:
         logger.warning("assistant fallback: openai request failed error=%r", exc)
-        return None
+        return None, "provider_request_failed"
 
     answer = _extract_openai_text(data)
     if not answer:
         logger.warning("assistant fallback: openai returned empty output")
-        return None
+        return None, "provider_empty_output"
 
-    return {
-        "answer": answer,
-        "provider": "openai",
-        "mode": _detect_mode(question),
-        "provider_reason": "openai_success",
-        "suggestions": DEFAULT_SUGGESTIONS,
+    return {"answer": answer, "provider": "openai"}, None
+
+
+def _call_openrouter(system_prompt: str, user_prompt: str, settings) -> tuple[dict | None, str | None]:
+    body = {
+        "model": settings.assistant_model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
     }
+
+    headers = {
+        "Authorization": f"Bearer {settings.assistant_api_key}",
+        "Content-Type": "application/json",
+    }
+    if settings.assistant_site_url:
+        headers["HTTP-Referer"] = settings.assistant_site_url
+    if settings.assistant_app_title:
+        headers["X-Title"] = settings.assistant_app_title
+
+    try:
+        with httpx.Client(timeout=25.0) as client:
+            response = client.post(
+                "https://openrouter.ai/api/v1/chat/completions",
+                headers=headers,
+                json=body,
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        body_preview = exc.response.text[:400] if exc.response is not None else ""
+        status_code = exc.response.status_code if exc.response is not None else "unknown"
+        logger.warning("assistant fallback: openrouter http error status=%s body=%s", status_code, body_preview)
+        return None, "provider_http_error"
+    except Exception as exc:
+        logger.warning("assistant fallback: openrouter request failed error=%r", exc)
+        return None, "provider_request_failed"
+
+    answer = _extract_openrouter_text(data)
+    if not answer:
+        logger.warning("assistant fallback: openrouter returned empty output")
+        return None, "provider_empty_output"
+
+    return {"answer": answer, "provider": "openrouter"}, None
+
+
+def _build_remote_answer(question: str, user: User, snapshot: dict, settings) -> tuple[dict | None, str | None]:
+    provider = str(getattr(settings, "assistant_provider", "local") or "local").strip().lower()
+    if provider == "local":
+        logger.info("assistant fallback: local provider selected")
+        return None, "local_provider_selected"
+
+    if not settings.assistant_api_key:
+        logger.info("assistant fallback: missing ASSISTANT_API_KEY")
+        return None, "missing_api_key"
+
+    system_prompt, user_prompt = _build_model_prompts(question, user, snapshot)
+
+    if provider == "openai":
+        return _call_openai(system_prompt, user_prompt, settings)
+
+    if provider == "openrouter":
+        return _call_openrouter(system_prompt, user_prompt, settings)
+
+    logger.warning("assistant fallback: unsupported provider=%s", provider)
+    return None, "unsupported_provider"
 
 
 def build_assistant_reply(question: str, db: Session, user: User, settings) -> dict:
@@ -219,10 +293,16 @@ def build_assistant_reply(question: str, db: Session, user: User, settings) -> d
         }
 
     snapshot = _build_finance_snapshot(db, user)
-    openai_answer = _build_openai_answer(normalized_question, user, snapshot, settings)
-    if openai_answer:
-        return openai_answer
+    remote_answer, provider_error = _build_remote_answer(normalized_question, user, snapshot, settings)
+    if remote_answer:
+        return {
+            **remote_answer,
+            "mode": _detect_mode(normalized_question),
+            "provider_reason": f"{remote_answer['provider']}_success",
+            "suggestions": DEFAULT_SUGGESTIONS,
+        }
+
     local_answer = _build_local_answer(normalized_question, snapshot, user)
-    if not settings.openai_api_key:
-        local_answer["provider_reason"] = "missing_api_key"
+    if provider_error:
+        local_answer["provider_reason"] = provider_error
     return local_answer

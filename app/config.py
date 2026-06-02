@@ -20,8 +20,20 @@ class Settings:
     smtp_user = os.getenv("SMTP_USER", "")
     smtp_password = os.getenv("SMTP_PASSWORD", "")
     smtp_from = os.getenv("SMTP_FROM", "") or smtp_user
-    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    openai_model = os.getenv("OPENAI_MODEL", "gpt-5-mini").strip() or "gpt-5-mini"
+    assistant_provider = os.getenv("ASSISTANT_PROVIDER", "openrouter").strip().lower() or "openrouter"
+    assistant_api_key = (
+        os.getenv("ASSISTANT_API_KEY", "").strip()
+        or os.getenv("OPENROUTER_API_KEY", "").strip()
+        or os.getenv("OPENAI_API_KEY", "").strip()
+    )
+    assistant_model = (
+        os.getenv("ASSISTANT_MODEL", "").strip()
+        or os.getenv("OPENROUTER_MODEL", "").strip()
+        or os.getenv("OPENAI_MODEL", "").strip()
+        or "openrouter/free"
+    )
+    assistant_site_url = os.getenv("ASSISTANT_SITE_URL", "https://digiai-finance-beta.onrender.com").strip()
+    assistant_app_title = os.getenv("ASSISTANT_APP_TITLE", "DiGiaI Caixa").strip()
 
 
 @lru_cache
