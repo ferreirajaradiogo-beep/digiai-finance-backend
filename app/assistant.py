@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date
+import logging
 
 import httpx
 from sqlalchemy.orm import Session
@@ -14,6 +15,8 @@ DEFAULT_SUGGESTIONS = [
     "Resumo do meu mes",
     "Qual categoria mais pesa?",
 ]
+
+logger = logging.getLogger("notafacil.assistant")
 
 
 def _round_money(value: float) -> float:
@@ -113,6 +116,7 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
         "answer": answer,
         "provider": "local",
         "mode": mode,
+        "provider_reason": "local_fallback",
         "suggestions": DEFAULT_SUGGESTIONS,
     }
 
@@ -157,6 +161,7 @@ def _extract_openai_text(payload: dict) -> str:
 
 def _build_openai_answer(question: str, user: User, snapshot: dict, settings) -> dict | None:
     if not settings.openai_api_key:
+        logger.info("assistant fallback: missing OPENAI_API_KEY")
         return None
 
     system_prompt, user_prompt = _build_openai_input(question, user, snapshot)
@@ -180,17 +185,24 @@ def _build_openai_answer(question: str, user: User, snapshot: dict, settings) ->
             )
             response.raise_for_status()
             data = response.json()
-    except Exception:
+    except httpx.HTTPStatusError as exc:
+        body_preview = exc.response.text[:400] if exc.response is not None else ""
+        logger.warning("assistant fallback: openai http error status=%s body=%s", exc.response.status_code if exc.response is not None else "unknown", body_preview)
+        return None
+    except Exception as exc:
+        logger.warning("assistant fallback: openai request failed error=%r", exc)
         return None
 
     answer = _extract_openai_text(data)
     if not answer:
+        logger.warning("assistant fallback: openai returned empty output")
         return None
 
     return {
         "answer": answer,
         "provider": "openai",
         "mode": _detect_mode(question),
+        "provider_reason": "openai_success",
         "suggestions": DEFAULT_SUGGESTIONS,
     }
 
@@ -202,6 +214,7 @@ def build_assistant_reply(question: str, db: Session, user: User, settings) -> d
             "answer": "Escreva uma pergunta sobre sincronizacao, plano, senha ou sobre seus gastos do mes.",
             "provider": "local",
             "mode": "help",
+            "provider_reason": "empty_question",
             "suggestions": DEFAULT_SUGGESTIONS,
         }
 
@@ -209,4 +222,7 @@ def build_assistant_reply(question: str, db: Session, user: User, settings) -> d
     openai_answer = _build_openai_answer(normalized_question, user, snapshot, settings)
     if openai_answer:
         return openai_answer
-    return _build_local_answer(normalized_question, snapshot, user)
+    local_answer = _build_local_answer(normalized_question, snapshot, user)
+    if not settings.openai_api_key:
+        local_answer["provider_reason"] = "missing_api_key"
+    return local_answer

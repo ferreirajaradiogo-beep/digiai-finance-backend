@@ -55,6 +55,7 @@ class AssistantChatOut(BaseModel):
     answer: str
     provider: str
     mode: str
+    provider_reason: str | None = None
     suggestions: list[str] = []
 
 
