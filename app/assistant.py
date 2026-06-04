@@ -178,6 +178,17 @@ def _extract_openrouter_text(payload: dict) -> str:
     return ""
 
 
+def _extract_gemini_text(payload: dict) -> str:
+    parts: list[str] = []
+    for candidate in payload.get("candidates") or []:
+        content = candidate.get("content") or {}
+        for item in content.get("parts") or []:
+            text = item.get("text")
+            if isinstance(text, str) and text.strip():
+                parts.append(text.strip())
+    return "\n\n".join(parts).strip()
+
+
 def _call_openai(system_prompt: str, user_prompt: str, settings) -> tuple[dict | None, str | None]:
     body = {
         "model": settings.assistant_model,
@@ -269,6 +280,51 @@ def _call_openrouter(system_prompt: str, user_prompt: str, settings, model: str)
     return {"answer": answer, "provider": "openrouter", "model_used": model}, None, None, None
 
 
+def _call_gemini(system_prompt: str, user_prompt: str, settings) -> tuple[dict | None, str | None]:
+    body = {
+        "systemInstruction": {
+            "parts": [{"text": system_prompt}],
+        },
+        "contents": [
+            {
+                "role": "user",
+                "parts": [{"text": user_prompt}],
+            }
+        ],
+    }
+
+    model = str(getattr(settings, "assistant_model", "") or "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+    try:
+        with httpx.Client(timeout=25.0) as client:
+            response = client.post(
+                url,
+                headers={
+                    "x-goog-api-key": settings.assistant_api_key,
+                    "Content-Type": "application/json",
+                },
+                json=body,
+            )
+            response.raise_for_status()
+            data = response.json()
+    except httpx.HTTPStatusError as exc:
+        body_preview = exc.response.text[:400] if exc.response is not None else ""
+        status_code = exc.response.status_code if exc.response is not None else "unknown"
+        logger.warning("assistant fallback: gemini model=%s http error status=%s body=%s", model, status_code, body_preview)
+        return None, "provider_http_error"
+    except Exception as exc:
+        logger.warning("assistant fallback: gemini model=%s request failed error=%r", model, exc)
+        return None, "provider_request_failed"
+
+    answer = _extract_gemini_text(data)
+    if not answer:
+        logger.warning("assistant fallback: gemini model=%s returned empty output", model)
+        return None, "provider_empty_output"
+
+    return {"answer": answer, "provider": "gemini", "model_used": model}, None
+
+
 def _iter_openrouter_models(settings) -> list[str]:
     models: list[str] = []
     primary = str(getattr(settings, "assistant_model", "") or "").strip()
@@ -295,6 +351,9 @@ def _build_remote_answer(question: str, user: User, snapshot: dict, settings) ->
 
     if provider == "openai":
         return _call_openai(system_prompt, user_prompt, settings)
+
+    if provider == "gemini":
+        return _call_gemini(system_prompt, user_prompt, settings)
 
     if provider == "openrouter":
         models = _iter_openrouter_models(settings)

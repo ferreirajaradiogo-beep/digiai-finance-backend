@@ -23,6 +23,7 @@ class Settings:
     assistant_provider = os.getenv("ASSISTANT_PROVIDER", "openrouter").strip().lower() or "openrouter"
     assistant_api_key = (
         os.getenv("ASSISTANT_API_KEY", "").strip()
+        or os.getenv("GEMINI_API_KEY", "").strip()
         or os.getenv("OPENROUTER_API_KEY", "").strip()
         or os.getenv("OPENAI_API_KEY", "").strip()
     )
