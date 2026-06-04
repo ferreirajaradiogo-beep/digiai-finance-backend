@@ -53,6 +53,14 @@ def _build_finance_snapshot(db: Session, user: User) -> dict:
     top_category_name, top_category_value = ("Sem despesas", 0.0)
     if category_totals:
         top_category_name, top_category_value = category_totals.most_common(1)[0]
+    top_categories = [
+        {"name": name, "value": _round_money(value)}
+        for name, value in category_totals.most_common(3)
+    ]
+    monthly_limit = _round_money(user.monthly_limit or 0)
+    limit_used_pct = 0
+    if monthly_limit > 0:
+        limit_used_pct = round((expense / monthly_limit) * 100)
 
     return {
         "month_label": today.strftime("%m/%Y"),
@@ -61,9 +69,11 @@ def _build_finance_snapshot(db: Session, user: User) -> dict:
         "balance": _round_money(income - expense),
         "top_category_name": top_category_name,
         "top_category_value": _round_money(top_category_value),
+        "top_categories": top_categories,
         "entries_count": len(month_transactions),
         "currency": user.currency or "BRL",
-        "monthly_limit": _round_money(user.monthly_limit or 0),
+        "monthly_limit": monthly_limit,
+        "limit_used_pct": limit_used_pct,
     }
 
 
@@ -83,9 +93,9 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
 
     if mode == "account":
         answer = (
-            "Use a mesma conta no app e no site, mantendo a URL da API em "
-            "https://notafacil-api.onrender.com. Se aparecer token invalido, "
-            "saia da conta e entre novamente para gerar uma sessao nova."
+            "Para sincronizar, use a mesma conta no app e no site e mantenha a API em "
+            "https://notafacil-api.onrender.com. Se aparecer token invalido, saia da conta "
+            "e entre novamente. Se ainda faltar dado, abra o app por alguns segundos para ele puxar o servidor."
         )
     elif mode == "finance":
         if snapshot["entries_count"] == 0:
@@ -96,21 +106,25 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
         else:
             limit_copy = ""
             if snapshot["monthly_limit"] > 0:
-                used_pct = round((snapshot["expense"] / snapshot["monthly_limit"]) * 100) if snapshot["monthly_limit"] else 0
-                limit_copy = f" Voce ja usou cerca de {used_pct}% do limite mensal."
+                limit_copy = f" Voce ja usou cerca de {snapshot['limit_used_pct']}% do limite mensal."
+            action_copy = ""
+            if snapshot["balance"] < 0:
+                action_copy = " Seu saldo do periodo ficou negativo, entao vale rever a categoria mais pesada primeiro."
+            elif snapshot["top_category_value"] > 0:
+                action_copy = f" Se quiser cortar gasto, comece por {snapshot['top_category_name']}."
             answer = (
                 f"No periodo atual ({snapshot['month_label']}), voce registrou {snapshot['entries_count']} lancamentos. "
                 f"Receitas: {snapshot['income']:.2f} {snapshot['currency']}. "
                 f"Gastos: {snapshot['expense']:.2f} {snapshot['currency']}. "
                 f"Saldo: {snapshot['balance']:.2f} {snapshot['currency']}. "
                 f"A categoria com maior peso foi {snapshot['top_category_name']} "
-                f"({snapshot['top_category_value']:.2f} {snapshot['currency']}).{limit_copy}"
+                f"({snapshot['top_category_value']:.2f} {snapshot['currency']}).{limit_copy}{action_copy}"
             )
     else:
         answer = (
             "Eu consigo ajudar com sincronizacao, conta, plano, senha e leitura do seu mes. "
-            "Pergunte algo como 'como sincronizar meu app?', 'qual categoria mais pesa?' "
-            "ou 'qual a diferenca entre Free e Pro?'."
+            "Pergunte algo direto, como 'como sincronizar meu app?', 'qual categoria mais pesa?' "
+            "ou 'o que muda do Free para o Pro?'."
         )
 
     return {
@@ -123,15 +137,26 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
 
 
 def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str, str]:
+    top_categories_text = ", ".join(
+        f"{item['name']} ({item['value']:.2f} {snapshot['currency']})" for item in snapshot["top_categories"]
+    ) or "nenhuma categoria com gasto"
+    plan_rules = (
+        "Plano Free: 1 conta, ate 10 categorias, ate 20 lancamentos por mes e moeda BRL. "
+        "Plano Pro: sem esses limites principais."
+    )
     system_prompt = (
         "Voce e o assistente do produto DiGiaI Caixa. Responda em portugues do Brasil, "
         "de forma objetiva, amigavel e pratica. Nao invente recursos que o produto nao tem. "
-        "Se a pergunta for sobre dados financeiros, use apenas o contexto fornecido. "
-        "Se a pergunta envolver sincronizacao, login, plano ou senha, explique passos concretos."
+        "Prefira respostas curtas, com 3 a 6 frases ou bullets curtos. "
+        "Nao comece com saudacoes longas nem repita o nome do usuario sem necessidade. "
+        "Se a pergunta for sobre dados financeiros, use apenas o contexto fornecido e cite os numeros exatos. "
+        "Se a pergunta envolver sincronizacao, login, plano ou senha, explique passos concretos e curtos. "
+        "Se faltar contexto, diga isso claramente em vez de improvisar."
     )
     user_prompt = (
         f"Usuario: {user.username}\n"
         f"Plano: {user.plan}\n"
+        f"Regras do produto: {plan_rules}\n"
         f"Idioma: {user.language}\n"
         f"Moeda: {snapshot['currency']}\n"
         f"Mes atual: {snapshot['month_label']}\n"
@@ -139,7 +164,10 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
         f"Receitas: {snapshot['income']}\n"
         f"Gastos: {snapshot['expense']}\n"
         f"Saldo: {snapshot['balance']}\n"
+        f"Limite mensal: {snapshot['monthly_limit']}\n"
+        f"Uso do limite: {snapshot['limit_used_pct']}%\n"
         f"Categoria com maior gasto: {snapshot['top_category_name']} ({snapshot['top_category_value']})\n\n"
+        f"Top categorias: {top_categories_text}\n\n"
         f"Pergunta do usuario: {question}"
     )
     return system_prompt, user_prompt
