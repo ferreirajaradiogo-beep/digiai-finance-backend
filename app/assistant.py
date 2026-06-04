@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import date
 import logging
+import time
 
 import httpx
 from sqlalchemy.orm import Session
@@ -215,7 +216,7 @@ def _call_openai(system_prompt: str, user_prompt: str, settings) -> tuple[dict |
     return {"answer": answer, "provider": "openai"}, None
 
 
-def _call_openrouter(system_prompt: str, user_prompt: str, settings, model: str) -> tuple[dict | None, str | None, int | None]:
+def _call_openrouter(system_prompt: str, user_prompt: str, settings, model: str) -> tuple[dict | None, str | None, int | None, int | None]:
     body = {
         "model": model,
         "messages": [
@@ -245,18 +246,27 @@ def _call_openrouter(system_prompt: str, user_prompt: str, settings, model: str)
     except httpx.HTTPStatusError as exc:
         body_preview = exc.response.text[:400] if exc.response is not None else ""
         status_code = exc.response.status_code if exc.response is not None else "unknown"
+        retry_after_seconds = None
+        try:
+            payload = exc.response.json() if exc.response is not None else {}
+            metadata = ((payload or {}).get("error") or {}).get("metadata") or {}
+            retry_after_raw = metadata.get("retry_after_seconds")
+            if retry_after_raw is not None:
+                retry_after_seconds = int(float(retry_after_raw))
+        except Exception:
+            retry_after_seconds = None
         logger.warning("assistant fallback: openrouter model=%s http error status=%s body=%s", model, status_code, body_preview)
-        return None, "provider_http_error", int(status_code) if isinstance(status_code, int) else None
+        return None, "provider_http_error", int(status_code) if isinstance(status_code, int) else None, retry_after_seconds
     except Exception as exc:
         logger.warning("assistant fallback: openrouter model=%s request failed error=%r", model, exc)
-        return None, "provider_request_failed", None
+        return None, "provider_request_failed", None, None
 
     answer = _extract_openrouter_text(data)
     if not answer:
         logger.warning("assistant fallback: openrouter model=%s returned empty output", model)
-        return None, "provider_empty_output", None
+        return None, "provider_empty_output", None, None
 
-    return {"answer": answer, "provider": "openrouter", "model_used": model}, None, None
+    return {"answer": answer, "provider": "openrouter", "model_used": model}, None, None, None
 
 
 def _iter_openrouter_models(settings) -> list[str]:
@@ -289,15 +299,27 @@ def _build_remote_answer(question: str, user: User, snapshot: dict, settings) ->
     if provider == "openrouter":
         models = _iter_openrouter_models(settings)
         last_reason = "provider_http_error"
-        for index, model in enumerate(models):
-            answer, reason, status_code = _call_openrouter(system_prompt, user_prompt, settings, model)
-            if answer:
-                return answer, None
-            if reason:
-                last_reason = reason
-            should_try_next = index < len(models) - 1 and status_code in {400, 429, 503}
-            if should_try_next:
-                logger.info("assistant retry: openrouter switching model after status=%s from=%s", status_code, model)
+        max_retry_after = 0
+
+        for pass_index in range(2):
+            for index, model in enumerate(models):
+                answer, reason, status_code, retry_after_seconds = _call_openrouter(system_prompt, user_prompt, settings, model)
+                if answer:
+                    return answer, None
+                if reason:
+                    last_reason = reason
+                if retry_after_seconds:
+                    max_retry_after = max(max_retry_after, retry_after_seconds)
+                should_try_next = index < len(models) - 1 and status_code in {400, 429, 503}
+                if should_try_next:
+                    logger.info("assistant retry: openrouter switching model after status=%s from=%s", status_code, model)
+                    continue
+                break
+            if pass_index == 0 and max_retry_after > 0:
+                wait_seconds = max(2, min(max_retry_after, 12))
+                logger.info("assistant retry: waiting %ss before retrying OpenRouter free pool", wait_seconds)
+                time.sleep(wait_seconds)
+                max_retry_after = 0
                 continue
             break
         return None, last_reason
