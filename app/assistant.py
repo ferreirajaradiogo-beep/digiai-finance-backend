@@ -215,9 +215,9 @@ def _call_openai(system_prompt: str, user_prompt: str, settings) -> tuple[dict |
     return {"answer": answer, "provider": "openai"}, None
 
 
-def _call_openrouter(system_prompt: str, user_prompt: str, settings) -> tuple[dict | None, str | None]:
+def _call_openrouter(system_prompt: str, user_prompt: str, settings, model: str) -> tuple[dict | None, str | None, int | None]:
     body = {
-        "model": settings.assistant_model,
+        "model": model,
         "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -245,18 +245,30 @@ def _call_openrouter(system_prompt: str, user_prompt: str, settings) -> tuple[di
     except httpx.HTTPStatusError as exc:
         body_preview = exc.response.text[:400] if exc.response is not None else ""
         status_code = exc.response.status_code if exc.response is not None else "unknown"
-        logger.warning("assistant fallback: openrouter http error status=%s body=%s", status_code, body_preview)
-        return None, "provider_http_error"
+        logger.warning("assistant fallback: openrouter model=%s http error status=%s body=%s", model, status_code, body_preview)
+        return None, "provider_http_error", int(status_code) if isinstance(status_code, int) else None
     except Exception as exc:
-        logger.warning("assistant fallback: openrouter request failed error=%r", exc)
-        return None, "provider_request_failed"
+        logger.warning("assistant fallback: openrouter model=%s request failed error=%r", model, exc)
+        return None, "provider_request_failed", None
 
     answer = _extract_openrouter_text(data)
     if not answer:
-        logger.warning("assistant fallback: openrouter returned empty output")
-        return None, "provider_empty_output"
+        logger.warning("assistant fallback: openrouter model=%s returned empty output", model)
+        return None, "provider_empty_output", None
 
-    return {"answer": answer, "provider": "openrouter"}, None
+    return {"answer": answer, "provider": "openrouter", "model_used": model}, None, None
+
+
+def _iter_openrouter_models(settings) -> list[str]:
+    models: list[str] = []
+    primary = str(getattr(settings, "assistant_model", "") or "").strip()
+    if primary:
+        models.append(primary)
+    for item in getattr(settings, "assistant_fallback_models", []) or []:
+        candidate = str(item or "").strip()
+        if candidate and candidate not in models:
+            models.append(candidate)
+    return models
 
 
 def _build_remote_answer(question: str, user: User, snapshot: dict, settings) -> tuple[dict | None, str | None]:
@@ -275,7 +287,20 @@ def _build_remote_answer(question: str, user: User, snapshot: dict, settings) ->
         return _call_openai(system_prompt, user_prompt, settings)
 
     if provider == "openrouter":
-        return _call_openrouter(system_prompt, user_prompt, settings)
+        models = _iter_openrouter_models(settings)
+        last_reason = "provider_http_error"
+        for index, model in enumerate(models):
+            answer, reason, status_code = _call_openrouter(system_prompt, user_prompt, settings, model)
+            if answer:
+                return answer, None
+            if reason:
+                last_reason = reason
+            should_try_next = index < len(models) - 1 and status_code in {400, 429, 503}
+            if should_try_next:
+                logger.info("assistant retry: openrouter switching model after status=%s from=%s", status_code, model)
+                continue
+            break
+        return None, last_reason
 
     logger.warning("assistant fallback: unsupported provider=%s", provider)
     return None, "unsupported_provider"

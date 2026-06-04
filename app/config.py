@@ -30,8 +30,16 @@ class Settings:
         os.getenv("ASSISTANT_MODEL", "").strip()
         or os.getenv("OPENROUTER_MODEL", "").strip()
         or os.getenv("OPENAI_MODEL", "").strip()
-        or "openrouter/free"
+        or "meta-llama/llama-3.2-3b-instruct:free"
     )
+    assistant_fallback_models = [
+        item.strip()
+        for item in os.getenv(
+            "ASSISTANT_FALLBACK_MODELS",
+            "meta-llama/llama-3.2-3b-instruct:free,qwen/qwen3-next-80b-a3b-instruct:free,meta-llama/llama-3.3-70b-instruct:free",
+        ).split(",")
+        if item.strip()
+    ]
     assistant_site_url = os.getenv("ASSISTANT_SITE_URL", "https://digiai-finance-beta.onrender.com").strip()
     assistant_app_title = os.getenv("ASSISTANT_APP_TITLE", "DiGiaI Caixa").strip()
 
