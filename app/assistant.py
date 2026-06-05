@@ -90,12 +90,21 @@ def _detect_mode(question: str) -> str:
 
 def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
     mode = _detect_mode(question)
+    normalized = question.lower()
 
     if mode == "account":
         answer = (
             "Para sincronizar, use a mesma conta no app e no site e mantenha a API em "
             "https://notafacil-api.onrender.com. Se aparecer token invalido, saia da conta "
             "e entre novamente. Se ainda faltar dado, abra o app por alguns segundos para ele puxar o servidor."
+        )
+    elif mode == "help" and any(term in normalized for term in ["plano", "free", "gratis", "pro"]):
+        plan_now = "Pro" if user.plan == "pro" else "Gratis"
+        answer = (
+            f"Sua conta hoje esta no plano {plan_now}. "
+            "No Gratis, o app permite 1 conta, ate 10 categorias, ate 20 lancamentos por mes e moeda BRL. "
+            "No Pro, esses limites principais deixam de travar seu uso. "
+            "Vale subir para o Pro quando voce precisar de mais contas, mais categorias ou quando o limite mensal de lancamentos comecar a atrapalhar."
         )
     elif mode == "finance":
         if snapshot["entries_count"] == 0:
@@ -156,6 +165,8 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
         "Se a pergunta envolver sincronizacao, login, plano ou senha, explique passos concretos e curtos. "
         "Quando a pergunta for sobre sincronizacao, priorize estes passos reais do produto: usar a mesma conta no app e no site, manter a API em https://notafacil-api.onrender.com, refazer login se aparecer token invalido e abrir o app por alguns segundos para puxar o servidor. "
         "Quando a pergunta for sobre plano, explique as regras reais de Free e Pro sem inventar beneficios. "
+        "Em perguntas de plano, diga primeiro em qual plano a conta esta hoje, depois explique objetivamente o limite do Gratis e o que o Pro destrava. "
+        "Se fizer sentido, diga quando vale o upgrade na pratica, mas sem pressionar nem prometer recursos que nao existem. "
         "Se faltar contexto, diga isso claramente em vez de improvisar."
     )
     user_prompt = (
