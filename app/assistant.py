@@ -151,6 +151,8 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
         "Nao comece com saudacoes longas nem repita o nome do usuario sem necessidade. "
         "Evite abertura como 'Ola' ou 'Oi' quando a pergunta for operacional. "
         "Se a pergunta for sobre dados financeiros, use apenas o contexto fornecido e cite os numeros exatos. "
+        "Em perguntas financeiras, nao pare no numero bruto: acrescente uma interpretacao curta e uma acao pratica quando fizer sentido. "
+        "Exemplo de estilo: diga qual categoria pesou mais, o que isso sugere sobre o mes e onde vale olhar primeiro para reduzir gasto. "
         "Se a pergunta envolver sincronizacao, login, plano ou senha, explique passos concretos e curtos. "
         "Quando a pergunta for sobre sincronizacao, priorize estes passos reais do produto: usar a mesma conta no app e no site, manter a API em https://notafacil-api.onrender.com, refazer login se aparecer token invalido e abrir o app por alguns segundos para puxar o servidor. "
         "Quando a pergunta for sobre plano, explique as regras reais de Free e Pro sem inventar beneficios. "
