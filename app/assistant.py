@@ -1,27 +1,284 @@
 from __future__ import annotations
 
+import calendar
 from collections import Counter
 from datetime import date
 import logging
+import re
 import time
 
 import httpx
 from sqlalchemy.orm import Session
 
-from .models import Category, Transaction, User
+from .models import Account, Category, Transaction, User
 
 
 DEFAULT_SUGGESTIONS = [
     "Como sincronizar meu app com o site?",
     "Resumo do meu mes",
     "Qual categoria mais pesa?",
+    "Lance 4 parcelas de 180 reais",
 ]
 
 logger = logging.getLogger("notafacil.assistant")
+ACTION_STOPWORDS = {
+    "altere",
+    "altere",
+    "mude",
+    "mudanca",
+    "mudar",
+    "data",
+    "datas",
+    "pagamento",
+    "pagamentos",
+    "para",
+    "pro",
+    "pros",
+    "nos",
+    "nas",
+    "dia",
+    "dias",
+    "conta",
+    "contas",
+    "de",
+    "da",
+    "do",
+    "das",
+    "dos",
+    "o",
+    "a",
+    "os",
+    "as",
+    "e",
+}
 
 
 def _round_money(value: float) -> float:
     return round(float(value or 0), 2)
+
+
+def _normalize_text(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    replacements = {
+        "á": "a",
+        "à": "a",
+        "ã": "a",
+        "â": "a",
+        "é": "e",
+        "ê": "e",
+        "í": "i",
+        "ó": "o",
+        "ô": "o",
+        "õ": "o",
+        "ú": "u",
+        "ç": "c",
+    }
+    for source, target in replacements.items():
+        text = text.replace(source, target)
+    return text
+
+
+def _safe_date(year: int, month: int, day: int) -> date:
+    last_day = calendar.monthrange(year, month)[1]
+    return date(year, month, min(day, last_day))
+
+
+def _add_months(base_date: date, months: int, day: int | None = None) -> date:
+    month_index = (base_date.month - 1) + months
+    year = base_date.year + (month_index // 12)
+    month = (month_index % 12) + 1
+    return _safe_date(year, month, day or base_date.day)
+
+
+def _format_money(value: float, currency: str = "BRL") -> str:
+    symbol = "R$" if currency == "BRL" else currency
+    formatted = f"{float(value or 0):,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    return f"{symbol} {formatted}"
+
+
+def _extract_amount(question: str) -> float | None:
+    normalized = _normalize_text(question)
+    match = re.search(r"(\d+[.,]?\d{0,2})\s*(reais|real|r\$)?", normalized)
+    if not match:
+        return None
+    return round(float(match.group(1).replace(".", "").replace(",", ".")), 2)
+
+
+def _extract_installment_count(question: str) -> int | None:
+    normalized = _normalize_text(question)
+    match = re.search(r"(\d+)\s+parcelas?", normalized)
+    if match:
+        return int(match.group(1))
+    match = re.search(r"parcelas?\s+de\s+(\d+)", normalized)
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def _extract_day_of_month(question: str) -> int | None:
+    normalized = _normalize_text(question)
+    match = re.search(r"dia\s+(\d{1,2})", normalized)
+    if not match:
+        return None
+    day = int(match.group(1))
+    if 1 <= day <= 31:
+        return day
+    return None
+
+
+def _find_account_and_warning(db: Session, user: User, question: str) -> tuple[Account | None, str | None]:
+    accounts = db.query(Account).filter(Account.user_id == user.id).order_by(Account.id).all()
+    if not accounts:
+        return None, "Nenhuma conta disponivel para executar a acao."
+
+    normalized = _normalize_text(question)
+    for account in accounts:
+        if _normalize_text(account.name) in normalized:
+            return account, None
+
+    return accounts[0], f"Conta escolhida automaticamente: {accounts[0].name}."
+
+
+def _find_category_and_warning(db: Session, user: User, question: str) -> tuple[Category | None, str | None]:
+    categories = db.query(Category).filter(Category.user_id == user.id).order_by(Category.id).all()
+    if not categories:
+        return None, "Nenhuma categoria disponivel para executar a acao."
+
+    normalized = _normalize_text(question)
+    for category in categories:
+        if _normalize_text(category.name) in normalized:
+            return category, None
+
+    preferred_names = ["cartao", "casa", "mercado"]
+    for preferred in preferred_names:
+        for category in categories:
+            if _normalize_text(category.name) == preferred and preferred in normalized:
+                return category, f"Categoria escolhida automaticamente: {category.name}."
+
+    if "cartao" in normalized:
+        for category in categories:
+            if _normalize_text(category.name) == "cartao":
+                return category, f"Categoria escolhida automaticamente: {category.name}."
+
+    return categories[0], f"Categoria escolhida automaticamente: {categories[0].name}."
+
+
+def _build_installments_preview(db: Session, user: User, question: str) -> dict | None:
+    normalized = _normalize_text(question)
+    if "parcela" not in normalized:
+        return None
+
+    count = _extract_installment_count(question)
+    amount = _extract_amount(question)
+    if not count or not amount:
+        return None
+
+    account, account_warning = _find_account_and_warning(db, user, question)
+    category, category_warning = _find_category_and_warning(db, user, question)
+    if not account or not category:
+        return None
+
+    today = date.today()
+    start_from_next_month = "proximos meses" in normalized or "proximos meses" in normalized
+    day = _extract_day_of_month(question) or today.day
+    start_date = _add_months(today, 1 if start_from_next_month else 0, day)
+    end_date = _add_months(start_date, count - 1, day)
+    description_base = "Parcela planejada"
+    if "agua" in normalized:
+        description_base = "Agua"
+    elif "internet" in normalized:
+        description_base = "Internet"
+    elif "aluguel" in normalized:
+        description_base = "Aluguel"
+    elif "cartao" in normalized:
+        description_base = "Cartao"
+
+    warnings = [item for item in [account_warning, category_warning] if item]
+    summary = (
+        f"Vou criar {count} parcelas mensais de {_format_money(amount)} "
+        f"de {start_date.strftime('%d/%m/%Y')} ate {end_date.strftime('%d/%m/%Y')}, "
+        f"na conta {account.name} e categoria {category.name}."
+    )
+    return {
+        "action_type": "create_installments",
+        "summary": summary,
+        "confirmation_label": "Confirmar parcelas",
+        "warnings": warnings,
+        "payload": {
+            "count": count,
+            "amount": amount,
+            "start_date": start_date.isoformat(),
+            "day": day,
+            "account_id": account.id,
+            "category_id": category.id,
+            "description_base": description_base,
+            "type": "despesa",
+        },
+    }
+
+
+def _extract_reschedule_keyword(question: str) -> str | None:
+    normalized = _normalize_text(question)
+    tokens = [token for token in re.findall(r"[a-z0-9]+", normalized) if len(token) >= 3 and token not in ACTION_STOPWORDS]
+    for token in tokens:
+        if token not in {"token", "api", "site", "app", "plano", "gratis", "pro"}:
+            return token
+    return None
+
+
+def _build_reschedule_preview(db: Session, user: User, question: str) -> dict | None:
+    normalized = _normalize_text(question)
+    if not any(term in normalized for term in ["altere", "mude", "remarque", "adiar", "adiare"]):
+        return None
+
+    new_day = _extract_day_of_month(question)
+    keyword = _extract_reschedule_keyword(question)
+    if not new_day or not keyword:
+        return None
+
+    future_transactions = (
+        db.query(Transaction, Category.name.label("category_name"))
+        .outerjoin(Category, Category.id == Transaction.category_id)
+        .filter(Transaction.user_id == user.id, Transaction.type == "despesa", Transaction.date >= date.today())
+        .order_by(Transaction.date.asc(), Transaction.id.asc())
+        .all()
+    )
+
+    matched_ids: list[int] = []
+    matched_titles: list[str] = []
+    for tx, category_name in future_transactions:
+        haystack = _normalize_text(f"{tx.description} {category_name or ''}")
+        if keyword in haystack:
+            matched_ids.append(tx.id)
+            matched_titles.append(tx.description)
+
+    if not matched_ids:
+        return None
+
+    count = len(matched_ids)
+    title_preview = matched_titles[0] if matched_titles else keyword
+    summary = (
+        f"Vou alterar {count} lancamento(s) futuro(s) ligado(s) a {title_preview} "
+        f"para o dia {new_day}."
+    )
+    return {
+        "action_type": "reschedule_future_transactions",
+        "summary": summary,
+        "confirmation_label": "Confirmar ajuste",
+        "warnings": [],
+        "payload": {
+            "transaction_ids": matched_ids,
+            "new_day": new_day,
+            "keyword": keyword,
+        },
+    }
+
+
+def _build_action_preview(db: Session, user: User, question: str) -> dict | None:
+    normalized = _normalize_text(question)
+    if not any(term in normalized for term in ["parcela", "altere", "mude", "remarque", "adiar"]):
+        return None
+    return _build_installments_preview(db, user, question) or _build_reschedule_preview(db, user, question)
 
 
 def _build_finance_snapshot(db: Session, user: User) -> dict:
@@ -431,6 +688,78 @@ def _build_remote_answer(question: str, user: User, snapshot: dict, settings) ->
     return None, "unsupported_provider"
 
 
+def execute_assistant_action(action_type: str, payload: dict, db: Session, user: User) -> dict:
+    if str(user.plan or "free").lower() != "pro":
+        raise ValueError("Esse assistente operacional para criar ou alterar lancamentos fica disponivel no plano Pro.")
+
+    action_type = str(action_type or "").strip().lower()
+    payload = payload or {}
+
+    if action_type == "create_installments":
+        account = db.get(Account, int(payload.get("account_id") or 0))
+        category = db.get(Category, int(payload.get("category_id") or 0))
+        if not account or account.user_id != user.id:
+            raise ValueError("Conta invalida para criar as parcelas.")
+        if not category or category.user_id != user.id:
+            raise ValueError("Categoria invalida para criar as parcelas.")
+
+        count = int(payload.get("count") or 0)
+        amount = float(payload.get("amount") or 0)
+        start_date = date.fromisoformat(str(payload.get("start_date")))
+        day = int(payload.get("day") or start_date.day)
+        description_base = str(payload.get("description_base") or "Parcela planejada").strip() or "Parcela planejada"
+        if count <= 0 or amount <= 0:
+            raise ValueError("Quantidade de parcelas e valor precisam ser maiores que zero.")
+
+        created = 0
+        for index in range(count):
+            tx_date = _add_months(start_date, index, day)
+            tx = Transaction(
+                user_id=user.id,
+                account_id=account.id,
+                category_id=category.id,
+                description=f"{description_base} {index + 1}/{count}",
+                value=round(amount * -1, 2),
+                type="despesa",
+                date=tx_date,
+            )
+            db.add(tx)
+            created += 1
+
+        db.commit()
+        return {
+            "ok": True,
+            "summary": f"{created} parcela(s) criada(s) com sucesso em {account.name} / {category.name}.",
+            "affected_count": created,
+        }
+
+    if action_type == "reschedule_future_transactions":
+        new_day = int(payload.get("new_day") or 0)
+        ids = [int(item) for item in (payload.get("transaction_ids") or [])]
+        if not ids or not (1 <= new_day <= 31):
+            raise ValueError("Nao consegui validar os lancamentos ou o novo dia.")
+
+        rows = (
+            db.query(Transaction)
+            .filter(Transaction.user_id == user.id, Transaction.id.in_(ids))
+            .order_by(Transaction.date.asc(), Transaction.id.asc())
+            .all()
+        )
+        updated = 0
+        for tx in rows:
+            tx.date = _safe_date(tx.date.year, tx.date.month, new_day)
+            updated += 1
+
+        db.commit()
+        return {
+            "ok": True,
+            "summary": f"{updated} lancamento(s) futuro(s) remarcado(s) para o dia {new_day}.",
+            "affected_count": updated,
+        }
+
+    raise ValueError("Acao do assistente ainda nao suportada.")
+
+
 def build_assistant_reply(question: str, db: Session, user: User, settings) -> dict:
     normalized_question = str(question or "").strip()
     if not normalized_question:
@@ -440,6 +769,25 @@ def build_assistant_reply(question: str, db: Session, user: User, settings) -> d
             "mode": "help",
             "provider_reason": "empty_question",
             "suggestions": DEFAULT_SUGGESTIONS,
+        }
+
+    action_preview = _build_action_preview(db, user, normalized_question)
+    if action_preview:
+        if str(user.plan or "free").lower() != "pro":
+            return {
+                "answer": "Esse comando transacional do assistente fica disponivel no plano Pro. Posso continuar ajudando com suporte, leitura financeira e sincronizacao.",
+                "provider": "local",
+                "mode": "help",
+                "provider_reason": "plan_upgrade_required",
+                "suggestions": DEFAULT_SUGGESTIONS,
+            }
+        return {
+            "answer": f"{action_preview['summary']} Confirme abaixo para executar.",
+            "provider": "local",
+            "mode": "action",
+            "provider_reason": "action_preview_ready",
+            "suggestions": DEFAULT_SUGGESTIONS,
+            "action_preview": action_preview,
         }
 
     snapshot = _build_finance_snapshot(db, user)

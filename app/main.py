@@ -7,7 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import and_, extract
 from sqlalchemy.orm import Session
 
-from .assistant import build_assistant_reply
+from .assistant import build_assistant_reply, execute_assistant_action
 from .config import get_settings
 from .database import Base, SessionLocal, engine, get_db
 from .email_service import send_reset_code
@@ -17,6 +17,8 @@ from .schemas import (
     AccountOut,
     AssistantChatIn,
     AssistantChatOut,
+    AssistantActionExecuteIn,
+    AssistantActionExecuteOut,
     BackupIn,
     CategoryIn,
     CategoryOut,
@@ -303,6 +305,14 @@ def update_password(data: PasswordUpdateIn, user: User = Depends(get_current_use
 @app.post("/assistant/chat", response_model=AssistantChatOut)
 def assistant_chat(data: AssistantChatIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return build_assistant_reply(data.question, db, user, settings)
+
+
+@app.post("/assistant/execute", response_model=AssistantActionExecuteOut)
+def assistant_execute(data: AssistantActionExecuteIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        return execute_assistant_action(data.action_type, data.payload, db, user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/accounts", response_model=list[AccountOut])

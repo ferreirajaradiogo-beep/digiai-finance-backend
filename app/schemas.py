@@ -51,12 +51,32 @@ class AssistantChatIn(BaseModel):
     mode: str | None = Field(default="auto", max_length=40)
 
 
+class AssistantActionPreview(BaseModel):
+    action_type: str
+    summary: str
+    confirmation_label: str = "Confirmar"
+    warnings: list[str] = Field(default_factory=list)
+    payload: dict = Field(default_factory=dict)
+
+
 class AssistantChatOut(BaseModel):
     answer: str
     provider: str
     mode: str
     provider_reason: str | None = None
-    suggestions: list[str] = []
+    suggestions: list[str] = Field(default_factory=list)
+    action_preview: AssistantActionPreview | None = None
+
+
+class AssistantActionExecuteIn(BaseModel):
+    action_type: str = Field(min_length=3, max_length=80)
+    payload: dict = Field(default_factory=dict)
+
+
+class AssistantActionExecuteOut(BaseModel):
+    ok: bool = True
+    summary: str
+    affected_count: int = 0
 
 
 class AccountIn(BaseModel):
