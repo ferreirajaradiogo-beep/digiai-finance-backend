@@ -96,12 +96,35 @@ def _format_money(value: float, currency: str = "BRL") -> str:
     return f"{symbol} {formatted}"
 
 
+def _parse_money_token(value: str) -> float | None:
+    token = str(value or "").strip()
+    if not token:
+        return None
+    if "," in token:
+        token = token.replace(".", "").replace(",", ".")
+    try:
+        amount = round(float(token), 2)
+    except ValueError:
+        return None
+    return amount if amount > 0 else None
+
+
 def _extract_amount(question: str) -> float | None:
     normalized = _normalize_text(question)
-    match = re.search(r"(\d+[.,]?\d{0,2})\s*(reais|real|r\$)?", normalized)
-    if not match:
-        return None
-    return round(float(match.group(1).replace(".", "").replace(",", ".")), 2)
+    money_pattern = r"(\d+(?:[.,]\d{1,2})?)"
+    preferred_patterns = [
+        rf"r\$\s*{money_pattern}",
+        rf"(?:parcelas?\s+de|parcela\s+de|cada\s+parcela\s+de|cada\s+uma\s+de)\s*{money_pattern}",
+        rf"(?:valor\s+de|no\s+valor\s+de|por)\s*{money_pattern}",
+        rf"{money_pattern}\s*(?:reais|real)",
+    ]
+    for pattern in preferred_patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            amount = _parse_money_token(match.group(1))
+            if amount:
+                return amount
+    return None
 
 
 def _extract_installment_count(question: str) -> int | None:
@@ -109,7 +132,7 @@ def _extract_installment_count(question: str) -> int | None:
     match = re.search(r"(\d+)\s+parcelas?", normalized)
     if match:
         return int(match.group(1))
-    match = re.search(r"parcelas?\s+de\s+(\d+)", normalized)
+    match = re.search(r"(?:em|para)\s+(\d+)\s+(?:vezes|meses)", normalized)
     if match:
         return int(match.group(1))
     return None
@@ -117,7 +140,7 @@ def _extract_installment_count(question: str) -> int | None:
 
 def _extract_day_of_month(question: str) -> int | None:
     normalized = _normalize_text(question)
-    match = re.search(r"dia\s+(\d{1,2})", normalized)
+    match = re.search(r"(?:dia|vencimento|pagamento)\s+(?:para\s+)?(\d{1,2})", normalized)
     if not match:
         return None
     day = int(match.group(1))
