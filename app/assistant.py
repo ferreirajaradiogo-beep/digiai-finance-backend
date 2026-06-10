@@ -143,7 +143,7 @@ def _extract_amount(question: str) -> float | None:
     preferred_patterns = [
         rf"r\$\s*{money_pattern}",
         rf"(?:parcelas?\s+de|parcela\s+de|cada\s+parcela\s+de|cada\s+uma\s+de)\s*{money_pattern}",
-        rf"(?:valor\s+de|no\s+valor\s+de|por)\s*{money_pattern}",
+        rf"(?:valor\s+de|no\s+valor\s+de|por|de)\s*{money_pattern}",
         rf"{money_pattern}\s*(?:reais|real)",
     ]
     for pattern in preferred_patterns:
@@ -152,6 +152,14 @@ def _extract_amount(question: str) -> float | None:
             amount = _parse_money_token(match.group(1))
             if amount:
                 return amount
+    decimal_match = re.search(r"\b(\d+[.,]\d{1,2})\b", normalized)
+    if decimal_match:
+        return _parse_money_token(decimal_match.group(1))
+    integer_matches = re.findall(r"(?<!dia\s)(?<!parcelas\s)(?<!meses\s)\b(\d{2,6})\b", normalized)
+    for token in integer_matches:
+        amount = _parse_money_token(token)
+        if amount and amount >= 10:
+            return amount
     return None
 
 
@@ -163,12 +171,15 @@ def _extract_installment_count(question: str) -> int | None:
     match = re.search(r"(?:em|para)\s+(\d+)\s+(?:vezes|meses)", normalized)
     if match:
         return int(match.group(1))
+    match = re.search(r"(?:por|durante)\s+(\d+)\s+mes(?:es)?", normalized)
+    if match:
+        return int(match.group(1))
     return None
 
 
 def _extract_day_of_month(question: str) -> int | None:
     normalized = _normalize_text(question)
-    match = re.search(r"(?:dia|vencimento|pagamento|vencendo todo dia|todo dia)\s+(?:para\s+)?(\d{1,2})", normalized)
+    match = re.search(r"(?:dia|vencimento|pagamento|vencendo todo dia|vence todo dia|vencer todo dia|todo dia)\s+(?:para\s+)?(\d{1,2})", normalized)
     if not match:
         return None
     day = int(match.group(1))
@@ -180,9 +191,31 @@ def _extract_day_of_month(question: str) -> int | None:
 def _extract_end_month(question: str) -> int | None:
     normalized = _normalize_text(question)
     for month_name, month_number in MONTH_NAME_TO_NUMBER.items():
-        if re.search(rf"(?:ate|até)\s+{month_name}\b", normalized):
+        if re.search(rf"(?:ate|até|termina em|terminando em|fim em)\s+{month_name}\b", normalized):
             return month_number
     return None
+
+
+def _extract_start_month(question: str) -> int | None:
+    normalized = _normalize_text(question)
+    for month_name, month_number in MONTH_NAME_TO_NUMBER.items():
+        if re.search(rf"(?:a partir de|a partir do mes de|a partir do mês de|comece em|comeca em|começa em|inicie em|inicia em|em)\s+{month_name}\b", normalized):
+            return month_number
+    return None
+
+
+def _extract_start_date(question: str, day: int) -> date:
+    normalized = _normalize_text(question)
+    today = date.today()
+    if any(term in normalized for term in ["mes que vem", "mês que vem", "proximo mes", "próximo mês"]):
+        return _add_months(today, 1, day)
+
+    start_month = _extract_start_month(question)
+    if start_month:
+        start_year = today.year if start_month >= today.month else today.year + 1
+        return _safe_date(start_year, start_month, day)
+
+    return _safe_date(today.year, today.month, day)
 
 
 def _extract_description_base(question: str) -> str:
@@ -201,15 +234,27 @@ def _extract_description_base(question: str) -> str:
         if key in normalized:
             return label
 
-    match = re.search(r"(?:chamada|chamado|descricao|descrição)\s+([a-z0-9 ]{3,40}?)(?:\s+no valor|\s+valor|\s+a partir|\s+ate|\s+vencendo|$)", normalized)
+    match = re.search(r"(?:chamada|chamado|descricao|descrição)\s+([a-z0-9 ]{3,40}?)(?:\s+de\s+\d|\s+no valor|\s+valor|\s+a partir|\s+ate|\s+vencendo|\s+por\s+\d|$)", normalized)
     if match:
         return match.group(1).strip().title()
+    match = re.search(
+        r"(?:lance|lancar|crie|criar|cadastre|cadastrar|registre|registrar)\s+(?:uma|um|a|o)?\s*(?:despesa|receita|lancamento|lançamento)?\s*(?:chamada|chamado)?\s*([a-z0-9 ]{3,40}?)(?:\s+(?:de|no valor|valor|por|a partir|ate|vencendo|todo|mensal|recorrente)|$)",
+        normalized,
+    )
+    if match:
+        candidate = match.group(1).strip()
+        if candidate and not re.fullmatch(r"\d+[.,]?\d*", candidate):
+            return candidate.title()
     return "Parcela planejada"
 
 
 def _is_recurring_request(question: str) -> bool:
     normalized = _normalize_text(question)
-    return any(term in normalized for term in ["recorrente", "todo mes", "todo mês", "mensal", "a partir do mes que vem", "a partir do mês que vem"])
+    return (
+        any(term in normalized for term in ["recorrente", "todo mes", "todo mês", "mensal", "todo dia", "a partir do mes que vem", "a partir do mês que vem"])
+        or _extract_end_month(question) is not None
+        or re.search(r"(?:por|durante)\s+\d+\s+mes(?:es)?", normalized) is not None
+    )
 
 
 def _build_recurring_preview(db: Session, user: User, question: str) -> dict | None:
@@ -219,19 +264,25 @@ def _build_recurring_preview(db: Session, user: User, question: str) -> dict | N
 
     amount = _extract_amount(question)
     end_month = _extract_end_month(question)
-    if not amount or not end_month:
+    duration_months = _extract_installment_count(question)
+    if not amount or (not end_month and not duration_months):
         return None
 
     today = date.today()
     day = _extract_day_of_month(question) or today.day
-    start_offset = 1 if any(term in normalized for term in ["mes que vem", "mês que vem", "proximo mes", "próximo mês"]) else 0
-    start_date = _add_months(today, start_offset, day)
-    end_year = start_date.year if end_month >= start_date.month else start_date.year + 1
-    end_date = _safe_date(end_year, end_month, day)
+    start_date = _extract_start_date(question, day)
+    if start_date < today and not _extract_start_month(question):
+        start_date = _add_months(start_date, 1, day)
+    if duration_months:
+        count = duration_months
+        end_date = _add_months(start_date, count - 1, day)
+    else:
+        end_year = start_date.year if end_month >= start_date.month else start_date.year + 1
+        end_date = _safe_date(end_year, end_month, day)
     if end_date < start_date:
         return None
 
-    count = ((end_date.year - start_date.year) * 12) + (end_date.month - start_date.month) + 1
+    count = duration_months or ((end_date.year - start_date.year) * 12) + (end_date.month - start_date.month) + 1
     if count <= 0:
         return None
 
@@ -318,9 +369,8 @@ def _build_installments_preview(db: Session, user: User, question: str) -> dict 
         return None
 
     today = date.today()
-    start_from_next_month = "proximos meses" in normalized or "proximos meses" in normalized
     day = _extract_day_of_month(question) or today.day
-    start_date = _add_months(today, 1 if start_from_next_month else 0, day)
+    start_date = _extract_start_date(question, day)
     end_date = _add_months(start_date, count - 1, day)
     description_base = _extract_description_base(question)
 
@@ -344,6 +394,58 @@ def _build_installments_preview(db: Session, user: User, question: str) -> dict 
             "category_id": category.id,
             "description_base": description_base,
             "type": "despesa",
+        },
+    }
+
+
+def _is_create_transaction_request(question: str) -> bool:
+    normalized = _normalize_text(question)
+    create_terms = ["lance", "lancar", "crie", "criar", "cadastre", "cadastrar", "registre", "registrar", "pague", "pagar", "agende", "agendar", "coloque", "colocar", "bote", "botar"]
+    finance_terms = ["despesa", "receita", "lancamento", "lançamento", "gasto", "compra", "entrada"]
+    return any(term in normalized for term in create_terms) and (
+        any(term in normalized for term in finance_terms) or _extract_amount(question) is not None
+    )
+
+
+def _build_single_transaction_preview(db: Session, user: User, question: str) -> dict | None:
+    if not _is_create_transaction_request(question):
+        return None
+
+    amount = _extract_amount(question)
+    if not amount:
+        return None
+
+    account, account_warning = _find_account_and_warning(db, user, question)
+    category, category_warning = _find_category_and_warning(db, user, question)
+    if not account or not category:
+        return None
+
+    normalized = _normalize_text(question)
+    tx_type = "receita" if any(term in normalized for term in ["receita", "entrada", "ganho", "salario", "salário"]) else "despesa"
+    signed_amount = amount if tx_type == "receita" else amount
+    day = _extract_day_of_month(question) or date.today().day
+    start_date = _extract_start_date(question, day)
+    description_base = _extract_description_base(question)
+
+    warnings = [item for item in [account_warning, category_warning] if item]
+    summary = (
+        f"Vou criar 1 {tx_type} de {_format_money(signed_amount)} para {description_base}, "
+        f"em {start_date.strftime('%d/%m/%Y')}, na conta {account.name} e categoria {category.name}."
+    )
+    return {
+        "action_type": "create_installments",
+        "summary": summary,
+        "confirmation_label": "Confirmar lancamento",
+        "warnings": warnings,
+        "payload": {
+            "count": 1,
+            "amount": amount,
+            "start_date": start_date.isoformat(),
+            "day": day,
+            "account_id": account.id,
+            "category_id": category.id,
+            "description_base": description_base,
+            "type": tx_type,
         },
     }
 
@@ -407,9 +509,14 @@ def _build_reschedule_preview(db: Session, user: User, question: str) -> dict | 
 
 def _build_action_preview(db: Session, user: User, question: str) -> dict | None:
     normalized = _normalize_text(question)
-    if not any(term in normalized for term in ["parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "mensal", "mes que vem"]):
+    if not any(term in normalized for term in ["lance", "crie", "cadastre", "registre", "pague", "agende", "coloque", "bote", "parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "todo dia", "mensal", "mes que vem", "ate"]):
         return None
-    return _build_installments_preview(db, user, question) or _build_recurring_preview(db, user, question) or _build_reschedule_preview(db, user, question)
+    return (
+        _build_installments_preview(db, user, question)
+        or _build_recurring_preview(db, user, question)
+        or _build_reschedule_preview(db, user, question)
+        or _build_single_transaction_preview(db, user, question)
+    )
 
 
 def _build_finance_snapshot(db: Session, user: User) -> dict:
@@ -502,6 +609,16 @@ def _looks_like_operational_request(question: str) -> bool:
         "criar",
         "cadastre",
         "cadastrar",
+        "registre",
+        "registrar",
+        "pague",
+        "pagar",
+        "agende",
+        "agendar",
+        "coloque",
+        "colocar",
+        "bote",
+        "botar",
         "altere",
         "alterar",
         "mude",
@@ -517,6 +634,10 @@ def _looks_like_operational_request(question: str) -> bool:
         "despesas",
         "receita",
         "receitas",
+        "gasto",
+        "gastos",
+        "compra",
+        "compras",
         "parcela",
         "parcelas",
         "pagamento",
@@ -554,9 +675,10 @@ def _build_operational_parse_help(user: User) -> str:
         )
     return (
         "Eu consigo fazer essa acao, mas faltou algum detalhe para montar a previa com seguranca. "
-        "Escreva em um destes formatos: 'Lance 4 parcelas de 180 reais', "
-        "'Crie uma despesa chamada internet de 94,90 a partir do mes que vem ate dezembro vencendo todo dia 3' "
-        "ou 'Altere a data dos pagamentos de agua para dia 12'. "
+        "Tente escrever com valor e periodo, por exemplo: 'lance mercado 50 reais', "
+        "'pague internet de 94,90 por 6 meses vencendo todo dia 5', "
+        "'agende aluguel 1200 mensal começando em julho ate dezembro dia 10' "
+        "ou 'altere a data dos pagamentos de agua para dia 12'. "
         "Quando eu reconhecer tudo, vou mostrar o card de confirmacao antes de executar."
     )
 
@@ -929,19 +1051,23 @@ def execute_assistant_action(action_type: str, payload: dict, db: Session, user:
         start_date = date.fromisoformat(str(payload.get("start_date")))
         day = int(payload.get("day") or start_date.day)
         description_base = str(payload.get("description_base") or "Parcela planejada").strip() or "Parcela planejada"
+        tx_type = str(payload.get("type") or "despesa").strip().lower()
+        if tx_type not in {"despesa", "receita"}:
+            tx_type = "despesa"
         if count <= 0 or amount <= 0:
             raise ValueError("Quantidade de parcelas e valor precisam ser maiores que zero.")
 
         created = 0
         for index in range(count):
             tx_date = _add_months(start_date, index, day)
+            signed_value = amount if tx_type == "receita" else round(amount * -1, 2)
             tx = Transaction(
                 user_id=user.id,
                 account_id=account.id,
                 category_id=category.id,
-                description=f"{description_base} {index + 1}/{count}",
-                value=round(amount * -1, 2),
-                type="despesa",
+                description=description_base if count == 1 else f"{description_base} {index + 1}/{count}",
+                value=signed_value,
+                type=tx_type,
                 date=tx_date,
             )
             db.add(tx)
