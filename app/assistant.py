@@ -18,6 +18,7 @@ DEFAULT_SUGGESTIONS = [
     "Resumo do meu mes",
     "Qual categoria mais pesa?",
     "Lance 4 parcelas de 180 reais",
+    "Crie uma despesa chamada internet de 94,90 ate dezembro todo dia 3",
 ]
 
 logger = logging.getLogger("notafacil.assistant")
@@ -466,6 +467,8 @@ def _build_finance_snapshot(db: Session, user: User) -> dict:
 
 def _detect_mode(question: str) -> str:
     normalized = question.lower()
+    if _is_operational_capability_question(normalized) or _is_assistant_identity_question(normalized):
+        return "action"
     if any(term in normalized for term in ["sincron", "token", "api", "site", "app", "conecta", "login"]):
         return "account"
     if any(term in normalized for term in ["plano", "pro", "free", "gratis", "pago", "senha"]):
@@ -475,11 +478,96 @@ def _detect_mode(question: str) -> str:
     return "help"
 
 
+def _is_operational_capability_question(question: str) -> bool:
+    normalized = _normalize_text(question)
+    has_capability_word = any(term in normalized for term in ["pode", "consegue", "faz", "cria", "criar", "lanca", "lancar", "cadastro", "cadastra"])
+    has_transaction_word = any(term in normalized for term in ["lancamento", "lancamentos", "despesa", "despesas", "receita", "receitas", "parcela", "parcelas", "recorrente"])
+    addressed_assistant = any(term in normalized for term in ["assistente", "voce", "vc", "tu"])
+    return has_transaction_word and (has_capability_word or addressed_assistant)
+
+
+def _is_assistant_identity_question(question: str) -> bool:
+    normalized = _normalize_text(question)
+    has_assistant_word = any(term in normalized for term in ["assistente", "ia", "bot"])
+    has_identity_word = any(term in normalized for term in ["voce", "vc", "tu", "sou", "falo", "falando"])
+    return has_assistant_word and has_identity_word
+
+
+def _looks_like_operational_request(question: str) -> bool:
+    normalized = _normalize_text(question)
+    action_terms = [
+        "lance",
+        "lancar",
+        "crie",
+        "criar",
+        "cadastre",
+        "cadastrar",
+        "altere",
+        "alterar",
+        "mude",
+        "mudar",
+        "remarque",
+        "remarcar",
+        "adiar",
+    ]
+    finance_terms = [
+        "lancamento",
+        "lancamentos",
+        "despesa",
+        "despesas",
+        "receita",
+        "receitas",
+        "parcela",
+        "parcelas",
+        "pagamento",
+        "pagamentos",
+        "vencimento",
+        "vencendo",
+        "mensal",
+        "recorrente",
+    ]
+    return any(term in normalized for term in action_terms) and any(term in normalized for term in finance_terms)
+
+
+def _build_operational_capability_answer(user: User) -> str:
+    plan_now = "Pro" if str(user.plan or "free").lower() == "pro" else "Gratis"
+    gate = (
+        "Na sua conta Pro, eu consigo preparar e executar acoes depois da sua confirmacao."
+        if plan_now == "Pro"
+        else "Na conta Gratis eu explico e analiso; as acoes automaticas ficam no Pro."
+    )
+    return (
+        f"Posso ajudar com lancamentos, sim. {gate} "
+        "Hoje eu consigo criar parcelas futuras, criar despesas mensais ate um mes final e remarcar vencimentos futuros. "
+        "Exemplos que funcionam: 'Lance 4 parcelas de 180 reais', "
+        "'Crie uma despesa chamada internet de 94,90 ate dezembro vencendo todo dia 3' ou "
+        "'Altere a data dos pagamentos de agua para dia 12'. "
+        "Quando eu entender a acao, vou mostrar uma previa e so executo depois que voce confirmar."
+    )
+
+
+def _build_operational_parse_help(user: User) -> str:
+    if str(user.plan or "free").lower() != "pro":
+        return (
+            "Eu entendi que voce quer uma acao operacional, mas a execucao automatica fica no plano Pro. "
+            "Mesmo assim, posso ajudar com leitura financeira, suporte e sincronizacao."
+        )
+    return (
+        "Eu consigo fazer essa acao, mas faltou algum detalhe para montar a previa com seguranca. "
+        "Escreva em um destes formatos: 'Lance 4 parcelas de 180 reais', "
+        "'Crie uma despesa chamada internet de 94,90 a partir do mes que vem ate dezembro vencendo todo dia 3' "
+        "ou 'Altere a data dos pagamentos de agua para dia 12'. "
+        "Quando eu reconhecer tudo, vou mostrar o card de confirmacao antes de executar."
+    )
+
+
 def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
     mode = _detect_mode(question)
     normalized = question.lower()
 
-    if mode == "account":
+    if mode == "action":
+        answer = _build_operational_capability_answer(user)
+    elif mode == "account":
         answer = (
             "Para sincronizar, use a mesma conta no app e no site e mantenha a API em "
             "https://notafacil-api.onrender.com. Se aparecer token invalido, saia da conta "
@@ -518,9 +606,9 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
             )
     else:
         answer = (
-            "Eu consigo ajudar com sincronizacao, conta, plano, senha e leitura do seu mes. "
-            "Pergunte algo direto, como 'como sincronizar meu app?', 'qual categoria mais pesa?' "
-            "ou 'o que muda do Free para o Pro?'."
+            "Eu consigo ajudar com sincronizacao, conta, plano, senha, leitura do mes e algumas acoes operacionais. "
+            "Pergunte algo direto, como 'qual categoria mais pesa?', 'lance 4 parcelas de 180 reais' "
+            "ou 'crie uma despesa chamada internet ate dezembro todo dia 3'."
         )
 
     return {
@@ -553,6 +641,9 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
         "Quando a pergunta for sobre sincronizacao, priorize estes passos reais do produto: usar a mesma conta no app e no site, manter a API em https://notafacil-api.onrender.com, refazer login se aparecer token invalido e abrir o app por alguns segundos para puxar o servidor. "
         "Quando a pergunta for sobre plano, explique as regras reais de Free e Pro sem inventar beneficios. "
         "Em perguntas de plano, diga primeiro em qual plano a conta esta hoje, depois explique objetivamente o limite do Gratis e o que o Pro destrava. "
+        "Quando a pergunta envolver criar, editar, parcelar, recorrencia ou vencimento de lancamentos, nunca diga que o produto nao faz isso e nunca invente botoes como 'Despesa Recorrente'. "
+        "Nesses casos, explique que o assistente pode preparar uma previa para confirmacao quando o comando tiver valor, data ou periodo, conta e categoria reconheciveis. "
+        "Use exemplos reais: 'Lance 4 parcelas de 180 reais', 'Crie uma despesa chamada internet de 94,90 a partir do mes que vem ate dezembro vencendo todo dia 3' e 'Altere a data dos pagamentos de agua para dia 12'. "
         "Se fizer sentido, diga quando vale o upgrade na pratica, mas sem pressionar nem prometer recursos que nao existem. "
         "Se faltar contexto, diga isso claramente em vez de improvisar."
     )
@@ -921,6 +1012,19 @@ def build_assistant_reply(question: str, db: Session, user: User, settings) -> d
         }
 
     snapshot = _build_finance_snapshot(db, user)
+    if _is_operational_capability_question(normalized_question) or _is_assistant_identity_question(normalized_question):
+        local_answer = _build_local_answer(normalized_question, snapshot, user)
+        local_answer["provider_reason"] = "operational_capability"
+        return local_answer
+    if _looks_like_operational_request(normalized_question):
+        return {
+            "answer": _build_operational_parse_help(user),
+            "provider": "local",
+            "mode": "action",
+            "provider_reason": "action_parse_incomplete",
+            "suggestions": DEFAULT_SUGGESTIONS,
+        }
+
     remote_answer, provider_error = _build_remote_answer(normalized_question, user, snapshot, settings)
     if remote_answer:
         return {
