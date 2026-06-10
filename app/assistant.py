@@ -52,6 +52,33 @@ ACTION_STOPWORDS = {
     "e",
 }
 
+MONTH_NAME_TO_NUMBER = {
+    "janeiro": 1,
+    "jan": 1,
+    "fevereiro": 2,
+    "fev": 2,
+    "marco": 3,
+    "mar": 3,
+    "abril": 4,
+    "abr": 4,
+    "maio": 5,
+    "mai": 5,
+    "junho": 6,
+    "jun": 6,
+    "julho": 7,
+    "jul": 7,
+    "agosto": 8,
+    "ago": 8,
+    "setembro": 9,
+    "set": 9,
+    "outubro": 10,
+    "out": 10,
+    "novembro": 11,
+    "nov": 11,
+    "dezembro": 12,
+    "dez": 12,
+}
+
 
 def _round_money(value: float) -> float:
     return round(float(value or 0), 2)
@@ -140,13 +167,101 @@ def _extract_installment_count(question: str) -> int | None:
 
 def _extract_day_of_month(question: str) -> int | None:
     normalized = _normalize_text(question)
-    match = re.search(r"(?:dia|vencimento|pagamento)\s+(?:para\s+)?(\d{1,2})", normalized)
+    match = re.search(r"(?:dia|vencimento|pagamento|vencendo todo dia|todo dia)\s+(?:para\s+)?(\d{1,2})", normalized)
     if not match:
         return None
     day = int(match.group(1))
     if 1 <= day <= 31:
         return day
     return None
+
+
+def _extract_end_month(question: str) -> int | None:
+    normalized = _normalize_text(question)
+    for month_name, month_number in MONTH_NAME_TO_NUMBER.items():
+        if re.search(rf"(?:ate|até)\s+{month_name}\b", normalized):
+            return month_number
+    return None
+
+
+def _extract_description_base(question: str) -> str:
+    normalized = _normalize_text(question)
+    known_descriptions = {
+        "agua": "Agua",
+        "internet": "Internet",
+        "aluguel": "Aluguel",
+        "cartao": "Cartao",
+        "mercado": "Mercado",
+        "energia": "Energia",
+        "luz": "Luz",
+        "telefone": "Telefone",
+    }
+    for key, label in known_descriptions.items():
+        if key in normalized:
+            return label
+
+    match = re.search(r"(?:chamada|chamado|descricao|descrição)\s+([a-z0-9 ]{3,40}?)(?:\s+no valor|\s+valor|\s+a partir|\s+ate|\s+vencendo|$)", normalized)
+    if match:
+        return match.group(1).strip().title()
+    return "Parcela planejada"
+
+
+def _is_recurring_request(question: str) -> bool:
+    normalized = _normalize_text(question)
+    return any(term in normalized for term in ["recorrente", "todo mes", "todo mês", "mensal", "a partir do mes que vem", "a partir do mês que vem"])
+
+
+def _build_recurring_preview(db: Session, user: User, question: str) -> dict | None:
+    normalized = _normalize_text(question)
+    if not _is_recurring_request(question):
+        return None
+
+    amount = _extract_amount(question)
+    end_month = _extract_end_month(question)
+    if not amount or not end_month:
+        return None
+
+    today = date.today()
+    day = _extract_day_of_month(question) or today.day
+    start_offset = 1 if any(term in normalized for term in ["mes que vem", "mês que vem", "proximo mes", "próximo mês"]) else 0
+    start_date = _add_months(today, start_offset, day)
+    end_year = start_date.year if end_month >= start_date.month else start_date.year + 1
+    end_date = _safe_date(end_year, end_month, day)
+    if end_date < start_date:
+        return None
+
+    count = ((end_date.year - start_date.year) * 12) + (end_date.month - start_date.month) + 1
+    if count <= 0:
+        return None
+
+    account, account_warning = _find_account_and_warning(db, user, question)
+    category, category_warning = _find_category_and_warning(db, user, question)
+    if not account or not category:
+        return None
+
+    description_base = _extract_description_base(question)
+    warnings = [item for item in [account_warning, category_warning] if item]
+    summary = (
+        f"Vou criar {count} despesa(s) mensais de {_format_money(amount)} "
+        f"para {description_base}, de {start_date.strftime('%d/%m/%Y')} ate {end_date.strftime('%d/%m/%Y')}, "
+        f"na conta {account.name} e categoria {category.name}."
+    )
+    return {
+        "action_type": "create_installments",
+        "summary": summary,
+        "confirmation_label": "Confirmar recorrencia",
+        "warnings": warnings,
+        "payload": {
+            "count": count,
+            "amount": amount,
+            "start_date": start_date.isoformat(),
+            "day": day,
+            "account_id": account.id,
+            "category_id": category.id,
+            "description_base": description_base,
+            "type": "despesa",
+        },
+    }
 
 
 def _find_account_and_warning(db: Session, user: User, question: str) -> tuple[Account | None, str | None]:
@@ -206,15 +321,7 @@ def _build_installments_preview(db: Session, user: User, question: str) -> dict 
     day = _extract_day_of_month(question) or today.day
     start_date = _add_months(today, 1 if start_from_next_month else 0, day)
     end_date = _add_months(start_date, count - 1, day)
-    description_base = "Parcela planejada"
-    if "agua" in normalized:
-        description_base = "Agua"
-    elif "internet" in normalized:
-        description_base = "Internet"
-    elif "aluguel" in normalized:
-        description_base = "Aluguel"
-    elif "cartao" in normalized:
-        description_base = "Cartao"
+    description_base = _extract_description_base(question)
 
     warnings = [item for item in [account_warning, category_warning] if item]
     summary = (
@@ -299,9 +406,9 @@ def _build_reschedule_preview(db: Session, user: User, question: str) -> dict | 
 
 def _build_action_preview(db: Session, user: User, question: str) -> dict | None:
     normalized = _normalize_text(question)
-    if not any(term in normalized for term in ["parcela", "altere", "mude", "remarque", "adiar"]):
+    if not any(term in normalized for term in ["parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "mensal", "mes que vem"]):
         return None
-    return _build_installments_preview(db, user, question) or _build_reschedule_preview(db, user, question)
+    return _build_installments_preview(db, user, question) or _build_recurring_preview(db, user, question) or _build_reschedule_preview(db, user, question)
 
 
 def _build_finance_snapshot(db: Session, user: User) -> dict:
