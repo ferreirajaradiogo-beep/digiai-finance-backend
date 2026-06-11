@@ -124,6 +124,18 @@ def _format_money(value: float, currency: str = "BRL") -> str:
     return f"{symbol} {formatted}"
 
 
+def _title_description(value: str) -> str:
+    words = str(value or "").strip().split()
+    if not words:
+        return ""
+    lower_words = {"de", "da", "do", "das", "dos", "e"}
+    titled: list[str] = []
+    for index, word in enumerate(words):
+        normalized = word.lower()
+        titled.append(normalized if index > 0 and normalized in lower_words else normalized.capitalize())
+    return " ".join(titled)
+
+
 def _parse_money_token(value: str) -> float | None:
     token = str(value or "").strip()
     if not token:
@@ -191,7 +203,7 @@ def _extract_day_of_month(question: str) -> int | None:
 def _extract_end_month(question: str) -> int | None:
     normalized = _normalize_text(question)
     for month_name, month_number in MONTH_NAME_TO_NUMBER.items():
-        if re.search(rf"(?:ate|até|termina em|terminando em|fim em)\s+{month_name}\b", normalized):
+        if re.search(rf"(?:ate|até|a|para|termina em|terminando em|fim em)\s+{month_name}\b", normalized):
             return month_number
     return None
 
@@ -199,7 +211,7 @@ def _extract_end_month(question: str) -> int | None:
 def _extract_start_month(question: str) -> int | None:
     normalized = _normalize_text(question)
     for month_name, month_number in MONTH_NAME_TO_NUMBER.items():
-        if re.search(rf"(?:a partir de|a partir do mes de|a partir do mês de|comece em|comeca em|começa em|inicie em|inicia em|em)\s+{month_name}\b", normalized):
+        if re.search(rf"(?:de|a partir de|a partir do mes de|a partir do mês de|comece em|comeca em|começa em|inicie em|inicia em|em)\s+{month_name}\b", normalized):
             return month_number
     return None
 
@@ -220,6 +232,15 @@ def _extract_start_date(question: str, day: int) -> date:
 
 def _extract_description_base(question: str) -> str:
     normalized = _normalize_text(question)
+    match = re.search(
+        r"(?:com\s+o\s+nome\s+de|com\s+o\s+nome|nome|chamada|chamado|descricao|descrição)\s+[\"']?([a-z0-9 ]{3,60}?)[\"']?(?:\s+vencendo|\s+vence|\s+no dia|\s+dia|\s+no valor|\s+valor|\s+de\s+\d|\s+a partir|\s+ate|\s+mensal|\s+todo|\s+por\s+\d|$)",
+        normalized,
+    )
+    if match:
+        candidate = match.group(1).strip()
+        if candidate:
+            return _title_description(candidate)
+
     known_descriptions = {
         "agua": "Agua",
         "internet": "Internet",
@@ -236,15 +257,15 @@ def _extract_description_base(question: str) -> str:
 
     match = re.search(r"(?:chamada|chamado|descricao|descrição)\s+([a-z0-9 ]{3,40}?)(?:\s+de\s+\d|\s+no valor|\s+valor|\s+a partir|\s+ate|\s+vencendo|\s+por\s+\d|$)", normalized)
     if match:
-        return match.group(1).strip().title()
+        return _title_description(match.group(1).strip())
     match = re.search(
         r"(?:lance|lancar|crie|criar|cadastre|cadastrar|registre|registrar)\s+(?:uma|um|a|o)?\s*(?:despesa|receita|lancamento|lançamento)?\s*(?:chamada|chamado)?\s*([a-z0-9 ]{3,40}?)(?:\s+(?:de|no valor|valor|por|a partir|ate|vencendo|todo|mensal|recorrente)|$)",
         normalized,
     )
     if match:
         candidate = match.group(1).strip()
-        if candidate and not re.fullmatch(r"\d+[.,]?\d*", candidate):
-            return candidate.title()
+        if candidate and candidate not in {"mensal", "recorrente"} and not re.fullmatch(r"\d+[.,]?\d*", candidate):
+            return _title_description(candidate)
     return "Parcela planejada"
 
 
