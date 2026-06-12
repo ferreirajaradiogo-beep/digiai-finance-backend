@@ -136,6 +136,14 @@ def _title_description(value: str) -> str:
     return " ".join(titled)
 
 
+def _extract_quoted_phrases(value: str | None) -> list[str]:
+    return [
+        item.strip()
+        for item in re.findall(r"[\"'“”]([^\"'“”]{2,80})[\"'“”]", str(value or ""))
+        if item.strip()
+    ]
+
+
 def _parse_money_token(value: str) -> float | None:
     token = str(value or "").strip()
     if not token:
@@ -232,6 +240,10 @@ def _extract_start_date(question: str, day: int) -> date:
 
 def _extract_description_base(question: str) -> str:
     normalized = _normalize_text(question)
+    original_quotes = _extract_quoted_phrases(question)
+    if original_quotes:
+        return _title_description(original_quotes[-1])
+
     match = re.search(
         r"(?:com\s+o\s+nome\s+de|com\s+o\s+nome|nome|chamada|chamado|descricao|descrição)\s+[\"']?([a-z0-9 ]{3,60}?)[\"']?(?:\s+vencendo|\s+vence|\s+no dia|\s+dia|\s+no valor|\s+valor|\s+de\s+\d|\s+a partir|\s+ate|\s+mensal|\s+todo|\s+por\s+\d|$)",
         normalized,
@@ -471,6 +483,95 @@ def _build_single_transaction_preview(db: Session, user: User, question: str) ->
     }
 
 
+def _is_edit_transaction_request(question: str) -> bool:
+    normalized = _normalize_text(question)
+    edit_terms = ["editar", "edite", "corrigir", "corrija", "trocar", "troque", "mudar", "mude", "alterar", "altere"]
+    transaction_terms = ["lancamento", "lançamento", "despesa", "receita", "parcela", "parcelas"]
+    return any(term in normalized for term in edit_terms) and any(term in normalized for term in transaction_terms)
+
+
+def _extract_edit_target(question: str) -> str | None:
+    quoted = _extract_quoted_phrases(question)
+    if quoted:
+        return _normalize_text(quoted[0])
+
+    normalized = _normalize_text(question)
+    match = re.search(
+        r"(?:lancamento|lançamento|despesa|receita|parcela|parcelas)\s+([a-z0-9 ]{3,60}?)(?:\s+para|\s+com|\s+no valor|\s+valor|\s+e\s+com|$)",
+        normalized,
+    )
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def _extract_new_description_for_edit(question: str) -> str | None:
+    match = re.search(
+        r"(?:para\s+(?:por|colocar|botar|mudar|trocar)?\s*(?:o\s+)?nome\s*(?:de)?|com\s+o\s+nome\s*(?:de)?|nome\s*(?:de)?)\s*[\"'“”]?(.+?)[\"'“”]?(?:\s+e\s+com|\s+com\s+o\s+valor|\s+no\s+valor|\s+valor\s+de|\s*$)",
+        str(question or ""),
+        re.IGNORECASE,
+    )
+    if match:
+        candidate = match.group(1).strip().strip("\"'“”")
+        if candidate:
+            return _title_description(candidate)
+
+    quoted = _extract_quoted_phrases(question)
+    if len(quoted) >= 2:
+        return _title_description(quoted[-1])
+    return None
+
+
+def _build_edit_transactions_preview(db: Session, user: User, question: str) -> dict | None:
+    if not _is_edit_transaction_request(question):
+        return None
+
+    target = _extract_edit_target(question)
+    new_description = _extract_new_description_for_edit(question)
+    new_amount = _extract_amount(question)
+    new_day = _extract_day_of_month(question)
+    if not target or (not new_description and not new_amount and not new_day):
+        return None
+
+    rows = (
+        db.query(Transaction)
+        .filter(Transaction.user_id == user.id)
+        .order_by(Transaction.date.asc(), Transaction.id.asc())
+        .all()
+    )
+    matched = [tx for tx in rows if target in _normalize_text(tx.description)]
+    if not matched:
+        return None
+
+    matched_ids = [tx.id for tx in matched[:30]]
+    changes: list[str] = []
+    if new_description:
+        changes.append(f"nome para {new_description}")
+    if new_amount:
+        changes.append(f"valor para {_format_money(new_amount)}")
+    if new_day:
+        changes.append(f"vencimento para dia {new_day}")
+
+    title_preview = matched[0].description
+    summary = (
+        f"Vou editar {len(matched_ids)} lancamento(s) encontrado(s) por {title_preview}: "
+        f"{', '.join(changes)}."
+    )
+    return {
+        "action_type": "edit_transactions",
+        "summary": summary,
+        "confirmation_label": "Confirmar edicao",
+        "warnings": [] if len(matched) <= 30 else ["Encontrei muitos lancamentos; vou editar os 30 primeiros."],
+        "payload": {
+            "transaction_ids": matched_ids,
+            "new_description": new_description,
+            "new_amount": new_amount,
+            "new_day": new_day,
+            "target": target,
+        },
+    }
+
+
 def _extract_reschedule_keyword(question: str) -> str | None:
     normalized = _normalize_text(question)
     tokens = [token for token in re.findall(r"[a-z0-9]+", normalized) if len(token) >= 3 and token not in ACTION_STOPWORDS]
@@ -530,10 +631,11 @@ def _build_reschedule_preview(db: Session, user: User, question: str) -> dict | 
 
 def _build_action_preview(db: Session, user: User, question: str) -> dict | None:
     normalized = _normalize_text(question)
-    if not any(term in normalized for term in ["lance", "crie", "cadastre", "registre", "pague", "agende", "coloque", "bote", "parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "todo dia", "mensal", "mes que vem", "ate"]):
+    if not any(term in normalized for term in ["editar", "edite", "corrigir", "corrija", "trocar", "troque", "lance", "crie", "cadastre", "registre", "pague", "agende", "coloque", "bote", "parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "todo dia", "mensal", "mes que vem", "ate"]):
         return None
     return (
-        _build_installments_preview(db, user, question)
+        _build_edit_transactions_preview(db, user, question)
+        or _build_installments_preview(db, user, question)
         or _build_recurring_preview(db, user, question)
         or _build_reschedule_preview(db, user, question)
         or _build_single_transaction_preview(db, user, question)
@@ -640,6 +742,12 @@ def _looks_like_operational_request(question: str) -> bool:
         "colocar",
         "bote",
         "botar",
+        "editar",
+        "edite",
+        "corrigir",
+        "corrija",
+        "trocar",
+        "troque",
         "altere",
         "alterar",
         "mude",
@@ -1099,6 +1207,44 @@ def execute_assistant_action(action_type: str, payload: dict, db: Session, user:
             "ok": True,
             "summary": f"{created} parcela(s) criada(s) com sucesso em {account.name} / {category.name}.",
             "affected_count": created,
+        }
+
+    if action_type == "edit_transactions":
+        ids = [int(item) for item in (payload.get("transaction_ids") or [])]
+        if not ids:
+            raise ValueError("Nao consegui validar os lancamentos para editar.")
+
+        new_description = str(payload.get("new_description") or "").strip()
+        new_amount_raw = payload.get("new_amount")
+        new_amount = float(new_amount_raw) if new_amount_raw not in {None, ""} else None
+        new_day_raw = payload.get("new_day")
+        new_day = int(new_day_raw) if new_day_raw not in {None, ""} else None
+        if not new_description and not new_amount and not new_day:
+            raise ValueError("Informe pelo menos nome, valor ou dia para editar.")
+        if new_day and not (1 <= new_day <= 31):
+            raise ValueError("Dia invalido para editar os lancamentos.")
+
+        rows = (
+            db.query(Transaction)
+            .filter(Transaction.user_id == user.id, Transaction.id.in_(ids))
+            .order_by(Transaction.date.asc(), Transaction.id.asc())
+            .all()
+        )
+        updated = 0
+        for tx in rows:
+            if new_description:
+                tx.description = new_description if len(rows) == 1 else f"{new_description} {updated + 1}/{len(rows)}"
+            if new_amount:
+                tx.value = new_amount if tx.type == "receita" else round(new_amount * -1, 2)
+            if new_day:
+                tx.date = _safe_date(tx.date.year, tx.date.month, new_day)
+            updated += 1
+
+        db.commit()
+        return {
+            "ok": True,
+            "summary": f"{updated} lancamento(s) editado(s) com sucesso.",
+            "affected_count": updated,
         }
 
     if action_type == "reschedule_future_transactions":
