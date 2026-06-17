@@ -780,14 +780,8 @@ def _looks_like_operational_request(question: str) -> bool:
 
 
 def _build_operational_capability_answer(user: User) -> str:
-    plan_now = "Pro" if str(user.plan or "free").lower() == "pro" else "Gratis"
-    gate = (
-        "Na sua conta Pro, eu consigo preparar e executar acoes depois da sua confirmacao."
-        if plan_now == "Pro"
-        else "Na conta Gratis eu explico e analiso; as acoes automaticas ficam no Pro."
-    )
     return (
-        f"Posso ajudar com lancamentos, sim. {gate} "
+        "Posso ajudar com lancamentos, sim. Eu consigo preparar e executar acoes depois da sua confirmacao. "
         "Hoje eu consigo criar parcelas futuras, criar despesas mensais ate um mes final e remarcar vencimentos futuros. "
         "Exemplos que funcionam: 'Lance 4 parcelas de 180 reais', "
         "'Crie uma despesa chamada internet de 94,90 ate dezembro vencendo todo dia 3' ou "
@@ -797,11 +791,6 @@ def _build_operational_capability_answer(user: User) -> str:
 
 
 def _build_operational_parse_help(user: User) -> str:
-    if str(user.plan or "free").lower() != "pro":
-        return (
-            "Eu entendi que voce quer uma acao operacional, mas a execucao automatica fica no plano Pro. "
-            "Mesmo assim, posso ajudar com leitura financeira, suporte e sincronizacao."
-        )
     return (
         "Eu consigo fazer essa acao, mas faltou algum detalhe para montar a previa com seguranca. "
         "Tente escrever com valor e periodo, por exemplo: 'lance mercado 50 reais', "
@@ -825,12 +814,9 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
             "e entre novamente. Se ainda faltar dado, abra o app por alguns segundos para ele puxar o servidor."
         )
     elif mode == "help" and any(term in normalized for term in ["plano", "free", "gratis", "pro"]):
-        plan_now = "Pro" if user.plan == "pro" else "Gratis"
         answer = (
-            f"Sua conta hoje esta no plano {plan_now}. "
-            "No Gratis, o app permite 1 conta, ate 10 categorias, ate 20 lancamentos por mes e moeda BRL. "
-            "No Pro, esses limites principais deixam de travar seu uso. "
-            "Vale subir para o Pro quando voce precisar de mais contas, mais categorias ou quando o limite mensal de lancamentos comecar a atrapalhar."
+            "O app agora funciona em modo gratuito para todos. "
+            "Nao ha separacao entre Gratis e Pro: contas, categorias, temas e assistente operacional ficam liberados."
         )
     elif mode == "finance":
         if snapshot["entries_count"] == 0:
@@ -857,7 +843,7 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
             )
     else:
         answer = (
-            "Eu consigo ajudar com sincronizacao, conta, plano, senha, leitura do mes e algumas acoes operacionais. "
+            "Eu consigo ajudar com sincronizacao, conta, senha, leitura do mes e acoes operacionais. "
             "Pergunte algo direto, como 'qual categoria mais pesa?', 'lance 4 parcelas de 180 reais' "
             "ou 'crie uma despesa chamada internet ate dezembro todo dia 3'."
         )
@@ -875,10 +861,7 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
     top_categories_text = ", ".join(
         f"{item['name']} ({item['value']:.2f} {snapshot['currency']})" for item in snapshot["top_categories"]
     ) or "nenhuma categoria com gasto"
-    plan_rules = (
-        "Plano Free: 1 conta, ate 10 categorias, ate 20 lancamentos por mes e moeda BRL. "
-        "Plano Pro: sem esses limites principais."
-    )
+    plan_rules = "O produto esta em modo gratuito para todos, sem separacao Free/Pro e sem bloqueios pagos."
     system_prompt = (
         "Voce e o assistente do produto DiGiaI Caixa. Responda em portugues do Brasil, "
         "de forma objetiva, amigavel e pratica. Nao invente recursos que o produto nao tem. "
@@ -888,14 +871,12 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
         "Se a pergunta for sobre dados financeiros, use apenas o contexto fornecido e cite os numeros exatos. "
         "Em perguntas financeiras, nao pare no numero bruto: acrescente uma interpretacao curta e uma acao pratica quando fizer sentido. "
         "Exemplo de estilo: diga qual categoria pesou mais, o que isso sugere sobre o mes e onde vale olhar primeiro para reduzir gasto. "
-        "Se a pergunta envolver sincronizacao, login, plano ou senha, explique passos concretos e curtos. "
+        "Se a pergunta envolver sincronizacao, login, acesso ou senha, explique passos concretos e curtos. "
         "Quando a pergunta for sobre sincronizacao, priorize estes passos reais do produto: usar a mesma conta no app e no site, manter a API em https://notafacil-api.onrender.com, refazer login se aparecer token invalido e abrir o app por alguns segundos para puxar o servidor. "
-        "Quando a pergunta for sobre plano, explique as regras reais de Free e Pro sem inventar beneficios. "
-        "Em perguntas de plano, diga primeiro em qual plano a conta esta hoje, depois explique objetivamente o limite do Gratis e o que o Pro destrava. "
+        "Quando a pergunta for sobre plano, explique que nao existe mais separacao entre Gratis e Pro: todos os recursos do produto estao gratuitos nesta publicacao. "
         "Quando a pergunta envolver criar, editar, parcelar, recorrencia ou vencimento de lancamentos, nunca diga que o produto nao faz isso e nunca invente botoes como 'Despesa Recorrente'. "
         "Nesses casos, explique que o assistente pode preparar uma previa para confirmacao quando o comando tiver valor, data ou periodo, conta e categoria reconheciveis. "
         "Use exemplos reais: 'Lance 4 parcelas de 180 reais', 'Crie uma despesa chamada internet de 94,90 a partir do mes que vem ate dezembro vencendo todo dia 3' e 'Altere a data dos pagamentos de agua para dia 12'. "
-        "Se fizer sentido, diga quando vale o upgrade na pratica, mas sem pressionar nem prometer recursos que nao existem. "
         "Se faltar contexto, diga isso claramente em vez de improvisar."
     )
     user_prompt = (
@@ -1161,9 +1142,6 @@ def _build_remote_answer(question: str, user: User, snapshot: dict, settings) ->
 
 
 def execute_assistant_action(action_type: str, payload: dict, db: Session, user: User) -> dict:
-    if str(user.plan or "free").lower() != "pro":
-        raise ValueError("Esse assistente operacional para criar ou alterar lancamentos fica disponivel no plano Pro.")
-
     action_type = str(action_type or "").strip().lower()
     payload = payload or {}
 
@@ -1287,14 +1265,6 @@ def build_assistant_reply(question: str, db: Session, user: User, settings) -> d
 
     action_preview = _build_action_preview(db, user, normalized_question)
     if action_preview:
-        if str(user.plan or "free").lower() != "pro":
-            return {
-                "answer": "Esse comando transacional do assistente fica disponivel no plano Pro. Posso continuar ajudando com suporte, leitura financeira e sincronizacao.",
-                "provider": "local",
-                "mode": "help",
-                "provider_reason": "plan_upgrade_required",
-                "suggestions": DEFAULT_SUGGESTIONS,
-            }
         return {
             "answer": f"{action_preview['summary']} Confirme abaixo para executar.",
             "provider": "local",

@@ -80,12 +80,7 @@ def normalize_theme_key(value: str | None, *, free_only: bool = False) -> str:
 
 
 def normalize_plan_value(value: str) -> str:
-    normalized = str(value or "").strip().lower()
-    if normalized in {"free", "gratis", "gratuito"}:
-        return "free"
-    if normalized == "pro":
-        return "pro"
-    raise HTTPException(status_code=400, detail="Plano invalido")
+    return "free"
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
 app.add_middleware(
@@ -107,11 +102,8 @@ def normalize_user_preferences() -> None:
         users = db.query(User).all()
         changed = False
         for user in users:
-            if user.plan not in {"free", "pro"}:
+            if user.plan != "free":
                 user.plan = "free"
-                changed = True
-            if user.plan == "free" and user.currency != "BRL":
-                user.currency = "BRL"
                 changed = True
             normalized_theme = normalize_theme_key(user.theme_key)
             if user.theme_key != normalized_theme:
@@ -144,14 +136,11 @@ def public_user(user: User) -> dict:
 
 
 def create_default_records(db: Session, user: User) -> None:
-    accounts = [Account(user_id=user.id, name="Conta principal", kind="banco", color="#41ead4")]
-    if user.plan != "free":
-        accounts.extend(
-            [
-                Account(user_id=user.id, name="Carteira", kind="carteira", color="#d8ff78"),
-                Account(user_id=user.id, name="Cartao", kind="cartao", color="#ff8a5b"),
-            ]
-        )
+    accounts = [
+        Account(user_id=user.id, name="Conta principal", kind="banco", color="#41ead4"),
+        Account(user_id=user.id, name="Carteira", kind="carteira", color="#d8ff78"),
+        Account(user_id=user.id, name="Cartao", kind="cartao", color="#ff8a5b"),
+    ]
     categories = [
         Category(user_id=user.id, name="Mercado", color="#41ead4"),
         Category(user_id=user.id, name="Cartao", color="#ff8a5b"),
@@ -168,20 +157,7 @@ def assert_user_resource(resource, user: User, label: str):
 
 
 def enforce_free_limits(db: Session, user: User, date_value=None):
-    if user.plan != "free":
-        return
-    if date_value:
-        count = (
-            db.query(Transaction)
-            .filter(
-                Transaction.user_id == user.id,
-                extract("month", Transaction.date) == date_value.month,
-                extract("year", Transaction.date) == date_value.year,
-            )
-            .count()
-        )
-        if count >= 20:
-            raise HTTPException(status_code=403, detail="Plano gratis permite 20 lancamentos por mes")
+    return
 
 
 @app.get("/health")
@@ -264,9 +240,6 @@ def me(user: User = Depends(get_current_user)):
 @app.patch("/me/settings")
 def update_settings(data: SettingsIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     normalized_theme_key = normalize_theme_key(data.theme_key) if data.theme_key is not None else None
-    if user.plan == "free":
-        if data.currency is not None and str(data.currency).strip().upper() != "BRL":
-            raise HTTPException(status_code=403, detail="Plano gratis permite apenas BRL")
     for field in ("language", "currency", "theme_key", "monthly_limit"):
         value = getattr(data, field)
         if value is not None:
@@ -280,11 +253,8 @@ def update_settings(data: SettingsIn, user: User = Depends(get_current_user), db
 
 @app.patch("/me/plan")
 def update_plan(data: PlanUpdateIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    next_plan = normalize_plan_value(data.plan)
-    user.plan = next_plan
-    if next_plan == "free":
-        user.currency = "BRL"
-        user.theme_key = normalize_theme_key(user.theme_key)
+    user.plan = "free"
+    user.theme_key = normalize_theme_key(user.theme_key)
     db.commit()
     db.refresh(user)
     return public_user(user)
@@ -322,8 +292,6 @@ def list_accounts(user: User = Depends(get_current_user), db: Session = Depends(
 
 @app.post("/accounts", response_model=AccountOut, status_code=status.HTTP_201_CREATED)
 def create_account(data: AccountIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.plan == "free" and db.query(Account).filter(Account.user_id == user.id).count() >= 1:
-        raise HTTPException(status_code=403, detail="Plano gratis permite apenas 1 conta")
     account = Account(user_id=user.id, **data.model_dump())
     db.add(account)
     db.commit()
@@ -360,8 +328,6 @@ def list_categories(user: User = Depends(get_current_user), db: Session = Depend
 
 @app.post("/categories", response_model=CategoryOut, status_code=status.HTTP_201_CREATED)
 def create_category(data: CategoryIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    if user.plan == "free" and db.query(Category).filter(Category.user_id == user.id).count() >= 10:
-        raise HTTPException(status_code=403, detail="Plano gratis permite ate 10 categorias")
     category = Category(user_id=user.id, **data.model_dump())
     db.add(category)
     db.commit()
