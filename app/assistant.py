@@ -238,6 +238,19 @@ def _extract_start_date(question: str, day: int) -> date:
     return _safe_date(today.year, today.month, day)
 
 
+def _extract_month_range(question: str) -> tuple[int, int] | None:
+    normalized = _normalize_text(question)
+    match = re.search(r"mes(?:es)?\s+de\s+(\d{1,2})\s+a\s+(?:mes\s+)?(\d{1,2})", normalized)
+    if not match:
+        match = re.search(r"de\s+(\d{1,2})\s+a\s+(?:mes\s+)?(\d{1,2})", normalized)
+    if match:
+        start_month = int(match.group(1))
+        end_month = int(match.group(2))
+        if 1 <= start_month <= 12 and 1 <= end_month <= 12:
+            return start_month, end_month
+    return None
+
+
 def _extract_description_base(question: str) -> str:
     normalized = _normalize_text(question)
     original_quotes = _extract_quoted_phrases(question)
@@ -279,6 +292,159 @@ def _extract_description_base(question: str) -> str:
         if candidate and candidate not in {"mensal", "recorrente"} and not re.fullmatch(r"\d+[.,]?\d*", candidate):
             return _title_description(candidate)
     return "Parcela planejada"
+
+
+def _find_category_by_terms(db: Session, user: User, terms: list[str], fallback_question: str = "") -> tuple[Category | None, str | None]:
+    categories = db.query(Category).filter(Category.user_id == user.id).order_by(Category.id).all()
+    if not categories:
+        return None, "Nenhuma categoria disponivel para executar a acao."
+
+    normalized_terms = [_normalize_text(term) for term in terms if term]
+    for category in categories:
+        normalized_name = _normalize_text(category.name)
+        if normalized_name in normalized_terms or any(term and term in normalized_name for term in normalized_terms):
+            return category, None
+
+    fallback_categories = categories
+    if not any(term in {"renda", "receita", "salario", "salário"} for term in normalized_terms):
+        non_income_categories = [
+            category
+            for category in categories
+            if _normalize_text(category.name) not in {"renda", "receita", "salario", "salário"}
+        ]
+        if non_income_categories:
+            fallback_categories = non_income_categories
+    return fallback_categories[0], f"Categoria escolhida automaticamente: {fallback_categories[0].name}."
+
+
+def _category_terms_for_item(title: str, tx_type: str) -> list[str]:
+    normalized = _normalize_text(title)
+    if tx_type == "receita":
+        return ["renda", "receita", "salario", "salário"]
+    if any(term in normalized for term in ["internet", "celular", "telefone", "moai", "assinatura"]):
+        return ["assinatura", "internet", "telefone", "contas"]
+    if "aluguel" in normalized:
+        return ["casa", "moradia", "aluguel"]
+    if any(term in normalized for term in ["dizimo", "dízimo", "igreja", "doacao", "doação"]):
+        return ["dizimo", "dízimo", "doacao", "doação", "igreja"]
+    if "cartao" in normalized or "cartão" in normalized:
+        return ["cartao", "cartão"]
+    return [normalized]
+
+
+def _extract_bulk_expense_items(question: str) -> tuple[list[dict], list[str]]:
+    normalized = _normalize_text(question)
+    warnings: list[str] = []
+    expenses_segment = normalized
+    despesa_index = expenses_segment.find("despesa")
+    if despesa_index >= 0:
+        expenses_segment = expenses_segment[despesa_index + len("despesa") :]
+    expenses_segment = re.split(r"\s+para\s+vencer|\s+vencendo|\s+vence", expenses_segment, maxsplit=1)[0]
+    expenses_segment = expenses_segment.replace(" e cartao", "; cartao").replace(" e cartão", "; cartao")
+    chunks = [chunk.strip(" ;,.") for chunk in re.split(r";", expenses_segment) if chunk.strip(" ;,.")]
+
+    items: list[dict] = []
+    for chunk in chunks:
+        if "zerado" in chunk or "zerada" in chunk:
+            warnings.append("Itens zerados foram ignorados porque lancamento precisa ter valor maior que zero.")
+            continue
+        match = re.search(
+            r"(?P<title>[a-z0-9 ]{2,60}?)(?:\s+(?:no\s+valor\s+de|valor\s+de|de)\s+)(?P<amount>\d+(?:[.,]\d{1,2})?)",
+            chunk,
+        )
+        if not match:
+            continue
+        raw_title = re.sub(r"^(?:de|da|do)\s+", "", match.group("title").strip())
+        title = _title_description(raw_title)
+        amount = _parse_money_token(match.group("amount"))
+        if title and amount:
+            items.append({"title": title, "amount": amount, "type": "despesa"})
+    return items, warnings
+
+
+def _build_bulk_monthly_preview(db: Session, user: User, question: str) -> dict | None:
+    normalized = _normalize_text(question)
+    if not all(term in normalized for term in ["receita", "despesa"]):
+        return None
+
+    month_range = _extract_month_range(question)
+    if not month_range:
+        return None
+    start_month, end_month = month_range
+    if end_month < start_month:
+        return None
+
+    day = _extract_day_of_month(question) or 1
+    today = date.today()
+    year = today.year if start_month >= today.month else today.year + 1
+    count = end_month - start_month + 1
+    start_date = _safe_date(year, start_month, day)
+    end_date = _safe_date(year, end_month, day)
+
+    account, account_warning = _find_account_and_warning(db, user, question)
+    if not account:
+        return None
+
+    income_match = re.search(r"receita(?:\s+[a-z ]{0,25})?(?:valor\s+de|de|no\s+valor\s+de)\s+(\d+(?:[.,]\d{1,2})?)", normalized)
+    income_amount = _parse_money_token(income_match.group(1)) if income_match else None
+    items: list[dict] = []
+    warnings = [item for item in [account_warning] if item]
+
+    if income_amount:
+        category, category_warning = _find_category_by_terms(db, user, _category_terms_for_item("Receita mensal", "receita"), "receita renda")
+        if not category:
+            return None
+        if category_warning:
+            warnings.append(f"Receita mensal: {category_warning}")
+        items.append(
+            {
+                "description_base": "Receita mensal",
+                "amount": income_amount,
+                "type": "receita",
+                "category_id": category.id,
+            }
+        )
+
+    expense_items, expense_warnings = _extract_bulk_expense_items(question)
+    warnings.extend(expense_warnings)
+    for item in expense_items:
+        category, category_warning = _find_category_by_terms(db, user, _category_terms_for_item(item["title"], "despesa"), item["title"])
+        if not category:
+            return None
+        if category_warning:
+            warnings.append(f"{item['title']}: {category_warning}")
+        items.append(
+            {
+                "description_base": item["title"],
+                "amount": item["amount"],
+                "type": "despesa",
+                "category_id": category.id,
+            }
+        )
+
+    if not items:
+        return None
+
+    created_count = len(items) * count
+    item_summary = ", ".join(f"{item['description_base']} ({_format_money(item['amount'])})" for item in items[:6])
+    summary = (
+        f"Vou criar {created_count} lancamento(s): {item_summary}, "
+        f"todo dia {day:02d}, de {start_date.strftime('%m/%Y')} ate {end_date.strftime('%m/%Y')}, "
+        f"na conta {account.name}."
+    )
+    return {
+        "action_type": "create_bulk_monthly_transactions",
+        "summary": summary,
+        "confirmation_label": "Confirmar lancamentos mensais",
+        "warnings": warnings,
+        "payload": {
+            "account_id": account.id,
+            "start_date": start_date.isoformat(),
+            "day": day,
+            "count": count,
+            "items": items,
+        },
+    }
 
 
 def _is_recurring_request(question: str) -> bool:
@@ -631,10 +797,11 @@ def _build_reschedule_preview(db: Session, user: User, question: str) -> dict | 
 
 def _build_action_preview(db: Session, user: User, question: str) -> dict | None:
     normalized = _normalize_text(question)
-    if not any(term in normalized for term in ["editar", "edite", "corrigir", "corrija", "trocar", "troque", "lance", "crie", "cadastre", "registre", "pague", "agende", "coloque", "bote", "parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "todo dia", "mensal", "mes que vem", "ate"]):
+    if not any(term in normalized for term in ["editar", "edite", "corrigir", "corrija", "trocar", "troque", "lance", "crie", "criar", "cadastre", "registre", "pague", "agende", "coloque", "bote", "parcela", "altere", "mude", "remarque", "adiar", "recorrente", "todo mes", "todo dia", "mensal", "mes que vem", "ate", "vencer", "vencendo", "despesa", "receita"]):
         return None
     return (
         _build_edit_transactions_preview(db, user, question)
+        or _build_bulk_monthly_preview(db, user, question)
         or _build_installments_preview(db, user, question)
         or _build_recurring_preview(db, user, question)
         or _build_reschedule_preview(db, user, question)
@@ -782,9 +949,10 @@ def _looks_like_operational_request(question: str) -> bool:
 def _build_operational_capability_answer(user: User) -> str:
     return (
         "Posso ajudar com lancamentos, sim. Eu consigo preparar e executar acoes depois da sua confirmacao. "
-        "Hoje eu consigo criar parcelas futuras, criar despesas mensais ate um mes final e remarcar vencimentos futuros. "
+        "Hoje eu consigo criar parcelas futuras, criar despesas mensais ate um mes final, criar lotes mensais com receita e varias despesas, e remarcar vencimentos futuros. "
         "Exemplos que funcionam: 'Lance 4 parcelas de 180 reais', "
-        "'Crie uma despesa chamada internet de 94,90 ate dezembro vencendo todo dia 3' ou "
+        "'Crie uma despesa chamada internet de 94,90 ate dezembro vencendo todo dia 3', "
+        "'Crie uma receita de 2200 e despesas de internet 109,90; aluguel 300 dos meses de 07 a 12 vencendo dia 01' ou "
         "'Altere a data dos pagamentos de agua para dia 12'. "
         "Quando eu entender a acao, vou mostrar uma previa e so executo depois que voce confirmar."
     )
@@ -845,7 +1013,7 @@ def _build_local_answer(question: str, snapshot: dict, user: User) -> dict:
         answer = (
             "Eu consigo ajudar com sincronizacao, conta, senha, leitura do mes e acoes operacionais. "
             "Pergunte algo direto, como 'qual categoria mais pesa?', 'lance 4 parcelas de 180 reais' "
-            "ou 'crie uma despesa chamada internet ate dezembro todo dia 3'."
+            "ou 'crie uma receita de 2200 e despesas de internet 109,90; aluguel 300 dos meses de 07 a 12 vencendo dia 01'."
         )
 
     return {
@@ -876,7 +1044,7 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
         "Quando a pergunta for sobre plano, explique que nao existe mais separacao entre Gratis e Pro: todos os recursos do produto estao gratuitos nesta publicacao. "
         "Quando a pergunta envolver criar, editar, parcelar, recorrencia ou vencimento de lancamentos, nunca diga que o produto nao faz isso e nunca invente botoes como 'Despesa Recorrente'. "
         "Nesses casos, explique que o assistente pode preparar uma previa para confirmacao quando o comando tiver valor, data ou periodo, conta e categoria reconheciveis. "
-        "Use exemplos reais: 'Lance 4 parcelas de 180 reais', 'Crie uma despesa chamada internet de 94,90 a partir do mes que vem ate dezembro vencendo todo dia 3' e 'Altere a data dos pagamentos de agua para dia 12'. "
+        "Use exemplos reais: 'Lance 4 parcelas de 180 reais', 'Crie uma despesa chamada internet de 94,90 a partir do mes que vem ate dezembro vencendo todo dia 3', 'Crie uma receita de 2200 e despesas de internet 109,90; aluguel 300 dos meses de 07 a 12 vencendo dia 01' e 'Altere a data dos pagamentos de agua para dia 12'. "
         "Se faltar contexto, diga isso claramente em vez de improvisar."
     )
     user_prompt = (
@@ -1184,6 +1352,52 @@ def execute_assistant_action(action_type: str, payload: dict, db: Session, user:
         return {
             "ok": True,
             "summary": f"{created} parcela(s) criada(s) com sucesso em {account.name} / {category.name}.",
+            "affected_count": created,
+        }
+
+    if action_type == "create_bulk_monthly_transactions":
+        account = db.get(Account, int(payload.get("account_id") or 0))
+        if not account or account.user_id != user.id:
+            raise ValueError("Conta invalida para criar os lancamentos.")
+
+        count = int(payload.get("count") or 0)
+        start_date = date.fromisoformat(str(payload.get("start_date")))
+        day = int(payload.get("day") or start_date.day)
+        items = payload.get("items") or []
+        if count <= 0 or not isinstance(items, list) or not items:
+            raise ValueError("Informe pelo menos um lancamento e um periodo valido.")
+
+        created = 0
+        for item in items:
+            category = db.get(Category, int(item.get("category_id") or 0))
+            if not category or category.user_id != user.id:
+                raise ValueError("Categoria invalida para um dos lancamentos.")
+            amount = float(item.get("amount") or 0)
+            if amount <= 0:
+                continue
+            tx_type = str(item.get("type") or "despesa").strip().lower()
+            if tx_type not in {"despesa", "receita"}:
+                tx_type = "despesa"
+            description_base = str(item.get("description_base") or "Lancamento mensal").strip() or "Lancamento mensal"
+            for index in range(count):
+                tx_date = _add_months(start_date, index, day)
+                signed_value = amount if tx_type == "receita" else round(amount * -1, 2)
+                tx = Transaction(
+                    user_id=user.id,
+                    account_id=account.id,
+                    category_id=category.id,
+                    description=description_base,
+                    value=signed_value,
+                    type=tx_type,
+                    date=tx_date,
+                )
+                db.add(tx)
+                created += 1
+
+        db.commit()
+        return {
+            "ok": True,
+            "summary": f"{created} lancamento(s) mensal(is) criado(s) com sucesso em {account.name}.",
             "affected_count": created,
         }
 
