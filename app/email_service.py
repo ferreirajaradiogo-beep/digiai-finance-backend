@@ -10,11 +10,11 @@ def send_reset_code(email_to: str, code: str) -> bool:
         return False
 
     message = EmailMessage()
-    message["Subject"] = "Codigo de recuperacao - NotaFacil"
+    message["Subject"] = "Codigo de recuperacao - Dig.ai Finanças"
     message["From"] = settings.smtp_from
     message["To"] = email_to
     message.set_content(
-        f"Seu codigo de recuperacao do NotaFacil e: {code}\n\n"
+        f"Seu codigo de recuperacao do Dig.ai Finanças e: {code}\n\n"
         "Se voce nao pediu isso, ignore este e-mail."
     )
 

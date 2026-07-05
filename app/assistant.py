@@ -1031,7 +1031,7 @@ def _build_model_prompts(question: str, user: User, snapshot: dict) -> tuple[str
     ) or "nenhuma categoria com gasto"
     plan_rules = "O produto esta em modo gratuito para todos, sem separacao Free/Pro e sem bloqueios pagos."
     system_prompt = (
-        "Voce e o assistente do produto DiGiaI Caixa. Responda em portugues do Brasil, "
+        "Voce e o assistente do produto Dig.ai Finanças. Responda em portugues do Brasil, "
         "de forma objetiva, amigavel e pratica. Nao invente recursos que o produto nao tem. "
         "Prefira respostas curtas, com 3 a 6 frases ou bullets curtos. "
         "Nao comece com saudacoes longas nem repita o nome do usuario sem necessidade. "

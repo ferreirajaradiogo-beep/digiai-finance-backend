@@ -1,6 +1,6 @@
-# NotaFácil Backend
+# Dig.ai Finanças Backend
 
-Backend SaaS oficial do NotaFácil, construído com FastAPI.
+Backend SaaS oficial do Dig.ai Finanças, construído com FastAPI.
 
 ## Objetivo
 
@@ -140,7 +140,7 @@ Depois abra:
 Se aparecer:
 
 ```text
-NotaFacil backend OK
+Dig.ai Finanças backend OK
 ```
 
 significa que a API conseguiu:

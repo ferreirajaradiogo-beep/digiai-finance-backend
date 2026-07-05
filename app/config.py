@@ -7,7 +7,7 @@ load_dotenv()
 
 
 class Settings:
-    app_name = os.getenv("APP_NAME", "NotaFacil API")
+    app_name = os.getenv("APP_NAME", "Dig.ai Finanças API")
     app_env = os.getenv("APP_ENV", "development")
     secret_key = os.getenv("SECRET_KEY", "dev-secret-change-me")
     database_url = os.getenv("DATABASE_URL", "sqlite:///./notafacil.db")
@@ -42,7 +42,7 @@ class Settings:
         if item.strip()
     ]
     assistant_site_url = os.getenv("ASSISTANT_SITE_URL", "https://digiai-finance-beta.onrender.com").strip()
-    assistant_app_title = os.getenv("ASSISTANT_APP_TITLE", "DiGiaI Caixa").strip()
+    assistant_app_title = os.getenv("ASSISTANT_APP_TITLE", "Dig.ai Finanças").strip()
 
 
 @lru_cache

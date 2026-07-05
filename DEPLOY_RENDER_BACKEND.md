@@ -35,7 +35,7 @@ Selecione o repositório do backend e deixe o Render ler o `render.yaml`.
 
 Ja definidas:
 
-- `APP_NAME=DigiAI Finance API`
+- `APP_NAME=Dig.ai Finanças API`
 - `APP_ENV=production`
 - `DEBUG_RESET_CODE=false`
 - `SECRET_KEY` gerada automaticamente

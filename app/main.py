@@ -162,14 +162,14 @@ def enforce_free_limits(db: Session, user: User, date_value=None):
 
 @app.get("/health")
 def health():
-    return {"ok": True, "app": "NotaFacil API"}
+    return {"ok": True, "app": "Dig.ai Finanças API"}
 
 
 @app.get("/")
 def root():
     return {
         "ok": True,
-        "app": "NotaFacil API",
+        "app": "Dig.ai Finanças API",
         "message": "Backend online. Acesse /docs para testar os endpoints.",
         "account": "A mesma conta pode ser usada no app mobile, site e programa desktop.",
     }

@@ -54,7 +54,7 @@ def main():
         sync.raise_for_status()
         backup.raise_for_status()
 
-    print("NotaFacil backend OK")
+    print("Dig.ai Finanças backend OK")
 
 
 if __name__ == "__main__":
