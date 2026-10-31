@@ -26,6 +26,7 @@ class User(Base):
     accounts: Mapped[list["Account"]] = relationship(cascade="all, delete-orphan")
     categories: Mapped[list["Category"]] = relationship(cascade="all, delete-orphan")
     transactions: Mapped[list["Transaction"]] = relationship(cascade="all, delete-orphan")
+    backups: Mapped[list["Backup"]] = relationship(cascade="all, delete-orphan")
 
 
 class Account(Base):

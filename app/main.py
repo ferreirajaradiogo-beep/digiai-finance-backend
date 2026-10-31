@@ -237,6 +237,13 @@ def me(user: User = Depends(get_current_user)):
     return public_user(user)
 
 
+@app.delete("/me")
+def delete_me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    db.delete(user)
+    db.commit()
+    return {"ok": True}
+
+
 @app.patch("/me/settings")
 def update_settings(data: SettingsIn, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     normalized_theme_key = normalize_theme_key(data.theme_key) if data.theme_key is not None else None
